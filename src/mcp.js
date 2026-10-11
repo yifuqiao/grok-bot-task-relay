@@ -7,7 +7,7 @@ import { validateAndNormalize } from "./task.js";
 import { taskService } from "./lifecycle.js";
 
 export const SERVER_NAME = "grok-bot-task-relay";
-export const SERVER_VERSION = "1.1.2";
+export const SERVER_VERSION = "1.1.3";
 export const SUPPORTED_PROTOCOLS = [
   "2026-07-28",
   "2025-11-25",
@@ -32,7 +32,17 @@ In pull delivery mode without a receiver webhook, accepted/queued means the rela
 
 When the user explicitly asks to hand the work to Cursor, do not call startCursorTask until they choose a repository. If that message already names one repository, use it. Otherwise call listCursorRepos once and ask, in the user's language, whether to create a new private repository or use one of the listed repositories. Wait for the choice. Omit repo_url only after they choose a new repository. Pass repo_url after they choose an existing one. Then call startCursorTask once. accepted means Cursor accepted the launch, not that the work finished. Use getCursorTask with that agent_id to read status and pull request URLs. Call continueCursorTask only when the user explicitly sends a follow-up. Do not retry a failed launch.
 
+When the user asks which relay version is connected, call getRelayInfo once and report name, version, deliveryMode, and statusReports from the tool result. Do not invent a version from the ChatGPT app listing.
+
 Never ask for, repeat, or store the webhook key, Cursor API key, or GitHub token.`;
+
+const INFO_TOOL = {
+  name: "getRelayInfo",
+  title: "Read this relay version",
+  description: "Return the connected Grok Bot relay name, version, delivery mode, and whether status reports are configured. Use when the user asks for the plugin or relay version.",
+  inputSchema: { type: "object", additionalProperties: false, properties: {} },
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+};
 
 const TOOL = {
   name: "submitTaskToGrokBot",
@@ -143,9 +153,17 @@ export async function handleMcp(message, config, fetchImpl = fetch, owner = "def
 
   if (method === "ping") return rpcResult(id, {});
 
-  if (method === "tools/list") return rpcResult(id, { tools: [TOOL, ...QUERY_TOOLS, ...CURSOR_TOOLS] });
+  if (method === "tools/list") return rpcResult(id, { tools: [TOOL, INFO_TOOL, ...QUERY_TOOLS, ...CURSOR_TOOLS] });
 
   if (method === "tools/call") {
+    if (params?.name === INFO_TOOL.name) {
+      const result = relayInfo(config);
+      return rpcResult(id, {
+        content: [{ type: "text", text: JSON.stringify(result) }],
+        structuredContent: result,
+        isError: false,
+      });
+    }
     if (QUERY_TOOLS.some((tool) => tool.name === params?.name)) {
       const outcome = readGrokStatus(params.arguments, config, owner);
       return rpcResult(id, {
@@ -217,6 +235,16 @@ export async function submitTask(input, config, fetchImpl = fetch, owner = "defa
   return {
     isError: !result.transportAccepted || Boolean(result.error),
     result: withReceipt({ ...result, ...tracked }),
+  };
+}
+
+function relayInfo(config) {
+  return {
+    name: SERVER_NAME,
+    version: SERVER_VERSION,
+    deliveryMode: config.deliveryMode || "webhook",
+    webhookConfigured: Boolean(config.webhookUrl && config.webhookKey),
+    statusReports: Boolean(config.botReportKey && (config.dataDir || config.statusDir)),
   };
 }
 
