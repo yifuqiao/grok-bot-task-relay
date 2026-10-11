@@ -30,7 +30,7 @@ const TOOL = {
     additionalProperties: false,
     required: ["title", "objective", "completion_criteria", "source"],
     properties: {
-      schema_version: { type: "string", description: 'Use "1".' },
+      schema_version: { type: "string", enum: ["1"], description: 'Use "1".' },
       task_id: { type: "string" },
       title: { type: "string" },
       objective: { type: "string" },
@@ -43,7 +43,8 @@ const TOOL = {
       completion_criteria: {
         type: "array",
         minItems: 1,
-        items: { type: "string" },
+        maxItems: 20,
+        items: { type: "string", minLength: 1, maxLength: 500 },
         description: "Checkable conditions for done.",
       },
       priority: { type: "string", enum: ["low", "normal", "high", "urgent"] },
@@ -75,12 +76,26 @@ export async function handleMcp(message, config, fetchImpl = fetch) {
   }
   const hasId = Object.prototype.hasOwnProperty.call(message, "id");
   const id = hasId ? message.id : undefined;
+  if (
+    message.jsonrpc !== "2.0" ||
+    typeof message.method !== "string" ||
+    (hasId && id !== null && typeof id !== "string" &&
+      !(typeof id === "number" && Number.isFinite(id))) ||
+    (message.params !== undefined &&
+      (!message.params || typeof message.params !== "object"))
+  ) {
+    return rpcError(null, -32600, "Invalid request");
+  }
   const method = message.method;
   const params = message.params ?? {};
 
   if (!hasId) {
     if (method === "notifications/initialized" || method === "notifications/cancelled") return null;
     return null;
+  }
+
+  if (Array.isArray(params)) {
+    return rpcError(id, -32602, "This server requires named parameters.");
   }
 
   if (method === "initialize") {
@@ -132,7 +147,7 @@ export async function submitTask(input, config, fetchImpl = fetch) {
     return { isError: true, result };
   }
   const result = await forwardTask(validated.task, config, fetchImpl);
-  return { isError: !result.transportAccepted, result };
+  return { isError: !result.transportAccepted || Boolean(result.error), result };
 }
 
 function rpcResult(id, result) {
