@@ -1,0 +1,14 @@
+[Unit]
+Description=Grok Bot task relay
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/grok-bot-task-relay
+EnvironmentFile=/etc/grok-bot-task-relay.env
+ExecStart=/usr/bin/node src/http.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
