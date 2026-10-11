@@ -7,6 +7,10 @@ const config = loadConfig();
 
 console.log(
   JSON.stringify({
+    deliveryMode: config.deliveryMode,
+    dataDir: config.dataDir ? "set" : "missing",
+    botReportKey: config.botReportKey ? "set" : "missing",
+    webhookRequired: config.deliveryMode === "webhook",
     webhookUrl: config.webhookUrl ? "set" : "missing",
     webhookKey: config.webhookKey ? "set" : "missing",
     relayApiKey: config.relayApiKey ? "set" : "missing",

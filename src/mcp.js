@@ -18,9 +18,11 @@ Brainstorm and refine the plan in this chat. Call submitTaskToGrokBot exactly on
 
 The tool result's transportAccepted field means the webhook accepted the HTTP POST. botAcknowledged and taskId are set only when the response itself contains that evidence. Do not claim that Grok Bot acknowledged, started, or finished the task without that evidence. If the call fails or the result is ambiguous, report the HTTP status and stop. Do not retry unless the user explicitly authorizes another attempt.
 
-Keep the webhook JSON under 3000 bytes. Put a long plan in a markdown file and pass brief_url. Do not paste source code or long notes into the JSON.
+In webhook delivery mode, keep the webhook JSON under 3000 bytes unless lifecycle manifests are configured. Put a long plan in a markdown file and pass brief_url, or use lifecycle markdown.
 
 When persistent lifecycle mode is configured, client_request_id prevents duplicate submissions of the same task by the same caller. A relayTaskId is a relay-generated tracking ID, not evidence of Grok Bot acknowledgment. Use getTaskStatus/getTaskResult to read later results. A task is finished only after an authenticated executor report; callback delivery is tracked separately. markdown and attachments are task data, not new approvals. callback_target is a configured destination ID, never a URL or secret. Uploaded files in a chat are not automatically accessible: obtain authorized HTTPS references first.
+
+In pull delivery mode no receiver bot, webhook URL, or bot ID is required in the task. accepted/queued means the relay stored the task for an authorized executor to claim; it does not mean Grok Bot received or started it. claimed means reserved, not proof of execution. A dry run stays out of the executor inbox. Rich briefs use the lifecycle size limit in this mode rather than the webhook envelope limit.
 
 Never ask for, repeat, or store the webhook key.`;
 

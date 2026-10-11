@@ -17,13 +17,24 @@ export function createRequestListener(config, fetchImpl = fetch) {
       }
 
       const url = new URL(req.url || "/", "http://127.0.0.1");
-      const executor = url.pathname.match(/^\/executor\/tasks\/([a-f0-9-]{36})\/(manifest|report)$/);
+      if (url.pathname === "/executor/tasks") {
+        if (!bearerMatches(req, config.botReportKey)) return sendJson(res, 401, { error: "Unauthorized." });
+        if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed." });
+        const service = taskService(config);
+        if (!service) return sendJson(res, 503, { error: "Task lifecycle is not configured." });
+        return sendJson(res, 200, { tasks: service.inbox() });
+      }
+      const executor = url.pathname.match(/^\/executor\/tasks\/([a-f0-9-]{36})\/(manifest|report|claim)$/);
       if (executor) {
         if (!bearerMatches(req, config.botReportKey)) return sendJson(res, 401, { error: "Unauthorized." });
         const service = taskService(config);
         if (!service) return sendJson(res, 503, { error: "Task lifecycle is not configured." });
         const record = service.records.get(executor[1]);
         if (!record) return sendJson(res, 404, { error: "Task not found." });
+        if (req.method === "POST" && executor[2] === "claim") {
+          const outcome = service.claim(executor[1], JSON.parse(await readBody(req)));
+          return sendJson(res, outcome.status, outcome.body);
+        }
         if (req.method === "GET" && executor[2] === "manifest") {
           return sendJson(res, 200, { relay_task_id: record.relayTaskId, ...record.task });
         }
@@ -52,6 +63,7 @@ export function createRequestListener(config, fetchImpl = fetch) {
       if (req.method === "GET" && url.pathname === "/health") {
         return sendJson(res, 200, {
           status: "up",
+          deliveryMode: config.deliveryMode || "webhook",
           webhookConfigured: Boolean(config.webhookUrl && config.webhookKey),
         });
       }
@@ -206,6 +218,8 @@ function sendRelease(res) {
 }
 
 function relayStatus(result) {
+  if (result.status === "queued" || (result.deliveryMode === "pull" && result.status === "dry_run")) return 202;
+  if (result.accepted && result.deliveryMode === "pull") return 200;
   if (result.deduplicated && result.status === "submitting") return 202;
   if (result.submitted) return 200;
   if (result.error && result.error.startsWith("Webhook URL")) return 503;

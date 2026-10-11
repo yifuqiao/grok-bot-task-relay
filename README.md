@@ -20,6 +20,10 @@ MCP 提供 `submitTaskToGrokBot`、`getTaskStatus`、`getTaskResult`；API 提�
 
 ## 配置
 
+不希望预设接收 Bot/webhook 时，可以选择 [执行端主动领取模式](docs/executor-pull.md)。各平台仍调用同一 MCP/API，任务先进入持久收件箱，再由已授权执行端领取。不需要填写 receiver bot ID 或 webhook；需要一次配置执行端访问与实际运行 worker，本项目不会自动唤醒或创建 Grok Bot。默认 webhook 模式保持兼容。
+
+pull 模式必须运行 `npm run start:http`，MCP 调用方连接 `/mcp`；stdio 入口会拒绝启动，避免接受执行端无法领取的任务。
+
 1. 在 Grok Bot 的 Routines 面板复制 Task Receiver webhook 的 URL 和发送密钥。
 2. 复制 `.env.example` 为 `.env`。URL 如果已经填好，只补 `GROK_BOT_WEBHOOK_KEY`。
 3. 面板如果显示的不是 `Authorization: Bearer`，再改 `GROK_BOT_WEBHOOK_AUTH_HEADER` 和 `GROK_BOT_WEBHOOK_AUTH_SCHEME`。Scheme 留空表示 header 里只放密钥本身。

@@ -16,6 +16,7 @@ export function taskService(config) {
 
 export class TaskService {
   constructor(config) {
+    if (!["webhook", "pull"].includes(config.deliveryMode || "webhook")) throw new Error("Invalid delivery mode.");
     if (typeof config.botReportKey !== "string" || !config.botReportKey.trim()) {
       throw new Error("Lifecycle mode requires BOT_REPORT_KEY for completion reports.");
     }
@@ -105,6 +106,8 @@ export class TaskService {
     return {
       relayTaskId: record.relayTaskId,
       status: record.status,
+      deliveryMode: record.deliveryMode || "webhook",
+      claimedAt: record.claimedAt ?? null,
       source: record.task.source,
       sourceThread: record.task.source_thread ?? null,
       createdAt: record.createdAt,
@@ -131,11 +134,19 @@ export class TaskService {
         return { isError: true, result: { error: "client_request_id was already used with different task contents." } };
       }
       return { isError: Boolean(previous.transport?.error) || previous.status === "unknown",
-        result: { ...(previous.transport ?? {}), ...this.view(previous), deduplicated: true } };
+        result: { ...(previous.transport ?? {}), ...this.view(previous),
+          ...(previous.deliveryMode === "pull" ? { accepted: true } : {}), deduplicated: true } };
     }
     const relayTaskId = randomUUID();
     const now = new Date().toISOString();
     const record = { relayTaskId, owner, task, fingerprint, status: "submitting", createdAt: now, updatedAt: now };
+    record.deliveryMode = this.config.deliveryMode || "webhook";
+    if (record.deliveryMode === "pull") {
+      record.status = task.dry_run ? "dry_run" : "queued";
+      this.save(record);
+      if (dedupeKey) this.dedupe.set(dedupeKey, relayTaskId);
+      return { isError: false, result: { accepted: true, ...this.view(record) } };
+    }
     const envelope = { ...task, task_id: task.task_id ?? relayTaskId, relay_task_id: relayTaskId };
     delete envelope.callback_target;
     delete envelope.client_request_id;
@@ -167,13 +178,46 @@ export class TaskService {
       result: { ...transport, ...this.view(current) } };
   }
 
+  inbox() {
+    return [...this.records.values()].filter((record) => record.status === "queued")
+      .slice(0, 100).map((record) => ({ relay_task_id: record.relayTaskId,
+        title: record.task.title, createdAt: record.createdAt }));
+  }
+
+  claim(id, input) {
+    const record = this.records.get(id);
+    if (!record) return { status: 404, body: { error: "Task not found." } };
+    if (!input || typeof input.claim_id !== "string" || !input.claim_id.trim() || input.claim_id.length > 120) {
+      return { status: 400, body: { error: "claim_id is required (max 120 characters)." } };
+    }
+    if (record.deliveryMode !== "pull" || record.task.dry_run) {
+      return { status: 409, body: { error: "Task is not claimable." } };
+    }
+    if (record.claimId) {
+      if (record.claimId !== input.claim_id) return { status: 409, body: { error: "Task already claimed." } };
+      return { status: 200, body: { ...this.view(record), deduplicated: true } };
+    }
+    if (record.status !== "queued") return { status: 409, body: { error: "Task is not queued." } };
+    record.claimId = input.claim_id;
+    record.claimedAt = record.updatedAt = new Date().toISOString();
+    record.status = "claimed";
+    this.save(record);
+    return { status: 200, body: this.view(record) };
+  }
+
   async report(id, input) {
     const record = this.records.get(id);
     if (!record) return { status: 404, body: { error: "Task not found." } };
     if (record.task.dry_run) return { status: 409, body: { error: "Dry-run tasks cannot be executed or completed." } };
+    if (record.deliveryMode === "pull" && !record.claimId) {
+      return { status: 409, body: { error: "Claim the queued task before reporting completion." } };
+    }
     const errors = [];
     if (!input || typeof input !== "object" || Array.isArray(input)) {
       return { status: 400, body: { error: "Report must be an object." } };
+    }
+    if (record.deliveryMode === "pull" && input.claim_id !== record.claimId) {
+      return { status: 409, body: { error: "Completion report must match the task claim_id." } };
     }
     if (typeof input.event_id !== "string" || !input.event_id.trim() || input.event_id.length > 120) errors.push("event_id is required (max 120 characters).");
     if (!["finished", "failed"].includes(input.status)) errors.push("status must be finished or failed.");
