@@ -1,0 +1,99 @@
+# Grok Bot 任务中转
+
+聊天留在 ChatGPT、Claude、Grok、Muse。方案聊清楚之后，你明确说一句「交给 Grok Bot 执行」，那个平台再调用这里的 `submitTaskToGrokBot`。中转服务把任务 POST 到你已经建好的 Grok Bot webhook。Webhook 密钥只放在本机 `.env`，不要贴进任何聊天。
+
+长说明写成 Markdown，用 `brief_url` 指向它。webhook 的 JSON 保持在 3000 字节以内，只放标题、目标、完成标准和这个地址。源码放压缩包，不放进 JSON，也不放进 Markdown。
+
+Grok Bot 收到的是一次执行请求。闲聊和头脑风暴不要走这条链路。
+
+## 配置
+
+1. 在 Grok Bot 的 Routines 面板复制 Task Receiver webhook 的 URL 和发送密钥。
+2. 复制 `.env.example` 为 `.env`。URL 如果已经填好，只补 `GROK_BOT_WEBHOOK_KEY`。
+3. 面板如果显示的不是 `Authorization: Bearer`，再改 `GROK_BOT_WEBHOOK_AUTH_HEADER` 和 `GROK_BOT_WEBHOOK_AUTH_SCHEME`。Scheme 留空表示 header 里只放密钥本身。
+4. 运行检查时只会看到 set / missing，不会打印密钥：
+
+```powershell
+node src/check-config.js
+```
+
+这台机器如果还没有单独安装 Node，可以用 Cursor 自带的：
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\cursor\resources\app\resources\helpers\node.exe" src/check-config.js
+```
+
+## 本地自测
+
+自测只打本机的假 webhook，不会请求 Grok Bot。
+
+```powershell
+node src/selftest.js
+```
+
+## 接到 Cursor
+
+Cursor 的 MCP 配置使用 stdio。进程会自己读取项目里的 `.env`。
+
+```json
+{
+  "mcpServers": {
+    "grok-bot-task-relay": {
+      "command": "C:\\Users\\yifug\\AppData\\Local\\Programs\\cursor\\resources\\app\\resources\\helpers\\node.exe",
+      "args": ["C:\\Users\\yifug\\grok-bot-mcp\\src\\stdio.js"]
+    }
+  }
+}
+```
+
+装好系统 Node 之后，把 `command` 改成 `node` 即可。
+
+## 放到 relay
+
+这个服务要跑在一直开着的 relay（`82.157.187.207`）上。电脑关机后，本机的 Cloudflare 临时隧道会停，网页版就连不上。
+
+relay 上用 systemd 和一份只有 root 能读的环境文件，不把密钥写进代码：
+
+- 程序目录：`/opt/grok-bot-task-relay`
+- 环境文件：`/etc/grok-bot-task-relay.env`（`GROK_BOT_WEBHOOK_URL`、`GROK_BOT_WEBHOOK_KEY`、`RELAY_API_KEY`）
+- 服务单元：`deploy/grok-bot-task-relay.service`
+- 对外地址：在现有 Caddy 上反代到 `127.0.0.1:8787`，见 `deploy/Caddyfile.snippet`
+- 运行环境：Node.js 22 或更新版本
+
+这台电脑目前没有该 relay 的 SSH 密钥，所以还没有登录，也没有把密钥拷上去。
+
+## 接到 ChatGPT、Claude、Grok、Muse
+
+网页版连的是公网 HTTPS，不是你电脑上的 `127.0.0.1`。先在本机启动中转，再用 Cloudflare Tunnel 给出地址。这个地址会在隧道重启后变化。
+
+```powershell
+node src/http.js
+cloudflared tunnel --url http://127.0.0.1:8787
+```
+
+把终端里出现的 `https://….trycloudflare.com` 加上 `/mcp`，作为各平台的 MCP 地址。调用方的钥匙是 `.env` 里的 `RELAY_API_KEY`，不是 Grok Bot 的 webhook 密钥。把它填进平台自己的认证框，不要贴进聊天。
+
+| 平台 | 在哪里加 | 认证 |
+| --- | --- | --- |
+| Cursor | 已写入本机 `mcp.json`，用本地进程，不经过隧道 | 进程自己读 `.env` |
+| Claude | Settings → Connectors → Add custom connector | Request header 选 `authorization`，值写 `Bearer <RELAY_API_KEY>`，`Bearer` 和密钥之间有一个空格 |
+| ChatGPT | Plugins → Add custom MCP server | 地址填 `https://….trycloudflare.com/mcp`，认证用同一把 Bearer 钥匙 |
+| Grok | grok.com/connectors → New Connector → Custom | 地址同上。有 authorization 字段时填这把 Bearer 钥匙 |
+| Muse 聊天 App | 没有自定义 MCP 入口 | 用 Muse Code |
+| Muse Code | `~/.config/muse/settings.json` 的 `mcp_servers` | `url` 填 MCP 地址，并带上同一个 authorization header |
+
+Claude 的网页版如果看不到 Request headers，说明当前账号还不能保存固定钥匙，需要改用 OAuth。那时候不要把服务改成免认证。
+
+## 贴给聊天平台的规则
+
+把下面这段放进该平台的自定义说明或项目说明：
+
+```text
+先在这里把任务聊清楚。只有当我明确说交给 Grok Bot 执行、发送或 relay 时，才调用 submitTaskToGrokBot 一次。
+
+提交时带上 schema_version "1"、title、objective、completion_criteria、source。source 用当前平台名，例如 chatgpt、claude、grok、muse。说明较长时写成 Markdown，用 brief_url 指向它，不要把长文或源码塞进 JSON。dry_run 只有我要求连通测试时才设为 true。
+
+不要向我要 webhook 密钥。调用结果里，transportAccepted 只表示 webhook 收下了这次 POST。只有 botAcknowledged 为 true，或结果里真有 taskId，才能说 Grok Bot 确认了任务。失败或结果含糊时报告 HTTP 状态，不要自动重试。
+```
+
+连通测试用准备好的 dry run，一次即可：标题 `relay-ping`，`dry_run` 为 true。看到 HTTP 状态之后停住。200 只说明 webhook 收了请求，不等于 Grok Bot 已经在对话里确认。
