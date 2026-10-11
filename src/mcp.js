@@ -1,4 +1,4 @@
-import { continueCursorTask, CURSOR_TOOLS, getCursorTask, startCursorTask } from "./cursor.js";
+import { continueCursorTask, CURSOR_TOOLS, getCursorTask, listCursorRepos, startCursorTask } from "./cursor.js";
 import { forwardTask } from "./forward.js";
 import { validateAndNormalize } from "./task.js";
 import { taskService } from "./lifecycle.js";
@@ -25,7 +25,7 @@ When persistent lifecycle mode is configured, client_request_id prevents duplica
 
 In pull delivery mode no receiver bot, webhook URL, or bot ID is required in the task. accepted/queued means the relay stored the task for an authorized executor to claim; it does not mean Grok Bot received or started it. claimed means reserved, not proof of execution. A dry run stays out of the executor inbox. Rich briefs use the lifecycle size limit in this mode rather than the webhook envelope limit.
 
-When the user explicitly asks to hand the work to Cursor, call startCursorTask once. Omit repo_url for a new task so the relay creates a private GitHub repository and a Cursor cloud agent opens a pull request. Pass repo_url when the user named an existing repository. accepted means Cursor accepted the launch, not that the work finished. Use getCursorTask with that agent_id to read status and pull request URLs. Call continueCursorTask only when the user explicitly sends a follow-up. Do not retry a failed launch.
+When the user explicitly asks to hand the work to Cursor, do not call startCursorTask until they choose a repository. If that message already names one repository, use it. Otherwise call listCursorRepos once and ask, in the user's language, whether to create a new private repository or use one of the listed repositories. Wait for the choice. Omit repo_url only after they choose a new repository. Pass repo_url after they choose an existing one. Then call startCursorTask once. accepted means Cursor accepted the launch, not that the work finished. Use getCursorTask with that agent_id to read status and pull request URLs. Call continueCursorTask only when the user explicitly sends a follow-up. Do not retry a failed launch.
 
 Never ask for, repeat, or store the webhook key, Cursor API key, or GitHub token.`;
 
@@ -196,6 +196,7 @@ export async function submitTask(input, config, fetchImpl = fetch, owner = "defa
 }
 
 function callCursor(name, args, config, fetchImpl, owner) {
+  if (name === "listCursorRepos") return listCursorRepos(args, config, fetchImpl);
   if (name === "startCursorTask") return startCursorTask(args, config, fetchImpl, owner);
   if (name === "getCursorTask") return getCursorTask(args, config, fetchImpl, owner);
   if (name === "continueCursorTask") return continueCursorTask(args, config, fetchImpl, owner);

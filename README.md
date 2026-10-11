@@ -104,7 +104,7 @@ ChatGPT 的自定义 MCP 会先找 OAuth。环境里要有 `RELAY_PUBLIC_BASE_UR
 
 ## ChatGPT 和 Cursor
 
-同一个 ChatGPT 对话可以把手头的任务交给 Cursor，再把进度拿回来。你明确说「交给 Cursor」时，ChatGPT 调用 `startCursorTask` 一次。没有仓库地址的新任务，中转先建一个私有 GitHub 仓库，再启动 Cursor 云端代理，由代理开 pull request。你已经点名仓库时，传 `repo_url`，不再新建。
+同一个 ChatGPT 对话可以把手头的任务交给 Cursor，再把进度拿回来。你说「交给 Cursor」之后，如果这句话里没有点名仓库，ChatGPT 先问你：新建一个私有仓库，还是用下面列出的现有仓库。你选定之后，它才调用 `startCursorTask` 一次。选新建时不传仓库地址，中转会建一个私有 GitHub 仓库。选现有仓库时用那个地址，不再新建。
 
 之后在这个对话里问进度，ChatGPT 用 `getCursorTask` 读代理状态和 pull request 地址。你要再补一句给 Cursor，它调用 `continueCursorTask` 一次。`accepted` 只表示 Cursor 收下了启动请求，不表示代码已经做完。
 
@@ -115,7 +115,7 @@ relay 的环境文件要增加 `CURSOR_API_KEY` 和 `CURSOR_GITHUB_TOKEN`。两�
 把下面这段放进该平台的自定义说明或项目说明：
 
 ```text
-先在这里把任务聊清楚。只有当我明确说交给 Grok Bot 执行、发送或 relay 时，才调用 submitTaskToGrokBot 一次。只有当我明确说交给 Cursor 时，才调用 startCursorTask 一次。新任务不要传 repo_url。问 Cursor 进度时用 getCursorTask。我明确要补充给 Cursor 时，才调用 continueCursorTask 一次。
+先在这里把任务聊清楚。只有当我明确说交给 Grok Bot 执行、发送或 relay 时，才调用 submitTaskToGrokBot 一次。只有当我明确说交给 Cursor 时，才开始 Cursor 交接。如果我没有点名仓库，先调用 listCursorRepos，问我是新建私有仓库还是用列出的现有仓库，等我选定后再调用 startCursorTask 一次。我选新建时不要传 repo_url。问 Cursor 进度时用 getCursorTask。我明确要补充给 Cursor 时，才调用 continueCursorTask 一次。
 
 提交时带上 schema_version "1"、title、objective、completion_criteria、source。source 用当前平台名，例如 chatgpt、claude、grok、muse。说明较长时写成 Markdown，用 brief_url 指向它，不要把长文或源码塞进 JSON。dry_run 只有我要求连通测试时才设为 true。
 

@@ -9,10 +9,24 @@ const memory = new Map();
 
 export const CURSOR_TOOLS = [
   {
+    name: "listCursorRepos",
+    title: "List repositories Cursor can use",
+    description:
+      "List existing GitHub repositories before handing work to Cursor. Call once when the user asks to send work to Cursor but has not yet chosen a repository. Show the returned repositories as choices, and also offer to create a new private repository. Do not call startCursorTask from this result.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        query: { type: "string", maxLength: 80, description: "Optional name filter." },
+      },
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  },
+  {
     name: "startCursorTask",
     title: "Hand one task to Cursor",
     description:
-      "Hand one approved task to a Cursor cloud agent. Call once, only after the user explicitly asks to send the work to Cursor. Omit repo_url for a new task so a private GitHub repository is created first. Pass repo_url when the user named an existing repository. accepted means Cursor accepted the launch, not that the work finished. Do not retry.",
+      "Hand one approved task to a Cursor cloud agent. Call once, only after the user has chosen a new private repository or one existing repository. Omit repo_url when they chose a new repository. Pass repo_url when they chose an existing one. accepted means Cursor accepted the launch, not that the work finished. Do not retry.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -67,6 +81,43 @@ export const CURSOR_TOOLS = [
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
 ];
+
+export async function listCursorRepos(input, config, fetchImpl = fetch) {
+  const query = typeof input?.query === "string" ? input.query.trim().toLowerCase() : "";
+  if (query.length > 80) return { isError: true, result: { repositories: [], error: "query must be at most 80 characters." } };
+  if (!config.cursorGithubToken) {
+    return {
+      isError: false,
+      result: {
+        repositories: [],
+        error: "No GitHub repositories are available to list. Ask whether to create a new private repository or which existing https repository URL to use. Do not ask for a token.",
+      },
+    };
+  }
+  const loaded = await requestJson(
+    fetchImpl,
+    `${GITHUB_API}?per_page=20&sort=updated&affiliation=owner,collaborator`,
+    {
+      method: "GET",
+      token: config.cursorGithubToken,
+      timeoutMs: config.timeoutMs,
+      secrets: secretValues(config),
+    },
+  );
+  if (!loaded.ok) return { isError: true, result: { repositories: [], error: loaded.error } };
+  const rows = Array.isArray(loaded.body) ? loaded.body : [];
+  const repositories = rows
+    .map((repo) => ({
+      name: typeof repo?.full_name === "string" ? repo.full_name : repo?.name,
+      url: typeof repo?.html_url === "string" ? repo.html_url : "",
+      private: repo?.private === true,
+      description: typeof repo?.description === "string" ? repo.description.slice(0, 200) : null,
+    }))
+    .filter((repo) => repo.name && repo.url.startsWith("https://"))
+    .filter((repo) => !query || `${repo.name} ${repo.description || ""}`.toLowerCase().includes(query))
+    .slice(0, 20);
+  return { isError: false, result: { repositories, error: null } };
+}
 
 export async function startCursorTask(input, config, fetchImpl = fetch, owner = "default") {
   const validated = validateStart(input);

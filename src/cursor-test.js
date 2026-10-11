@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { continueCursorTask, getCursorTask, startCursorTask } from "./cursor.js";
+import { continueCursorTask, getCursorTask, listCursorRepos, startCursorTask } from "./cursor.js";
 import { handleMcp } from "./mcp.js";
 
 const cursorKey = "cursor-key-test-value";
@@ -138,10 +138,30 @@ await check("a rejected Cursor launch is not retried and does not echo secrets",
   assert.equal(JSON.stringify(outcome.result).includes(cursorKey), false);
 });
 
+await check("repository choices are listed before a Cursor handoff", async () => {
+  const fetchImpl = scriptedFetch([
+    jsonResponse(200, [
+      { full_name: "example/plant-notes", html_url: "https://github.com/example/plant-notes", private: true, description: `notes ${githubToken}` },
+      { full_name: "example/other", html_url: "https://github.com/example/other", private: false, description: "unrelated" },
+    ]),
+  ]);
+  const listed = await listCursorRepos({ query: "plant" }, config(fetchImpl.path), fetchImpl.impl);
+  assert.equal(listed.isError, false);
+  assert.equal(listed.result.repositories.length, 1);
+  assert.equal(listed.result.repositories[0].url, "https://github.com/example/plant-notes");
+  assert.equal(JSON.stringify(listed.result).includes(githubToken), false);
+  assert.equal(fetchImpl.calls.length, 1);
+
+  const missing = await listCursorRepos({}, { cursorGithubToken: "" }, mustNotFetch().impl);
+  assert.equal(missing.result.repositories.length, 0);
+  assert.match(missing.result.error, /new private repository/);
+});
+
 await check("MCP lists the Cursor handoff beside the Grok Bot tool", async () => {
   const listed = await handleMcp({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { dataDir: "" });
   const names = listed.result.tools.map((tool) => tool.name);
   assert.equal(names[0], "submitTaskToGrokBot");
+  assert.ok(names.includes("listCursorRepos"));
   assert.ok(names.includes("startCursorTask"));
   assert.ok(names.includes("getCursorTask"));
   assert.ok(names.includes("continueCursorTask"));
