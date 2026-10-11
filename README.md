@@ -102,6 +102,12 @@ Claude 的网页版如果看不到 Request headers，说明当前账号还不能
 
 ChatGPT 的自定义 MCP 会先找 OAuth。环境里要有 `RELAY_PUBLIC_BASE_URL`（例如 `https://relay.onetopway.com`，不要带路径或结尾斜杠）。Caddy 必须反代整个站点，不能只转发 `/mcp`，否则 `/.well-known` 会 404。同意页核对的是现有的 `RELAY_API_KEY`。Bearer 钥匙仍然可以直接调用，OAuth 通过后发给聊天应用的是另一把访问令牌。
 
+## ChatGPT 看 Grok Bot 的执行状态
+
+交给 Grok Bot 之后，ChatGPT 拿到 `relayTaskId`。你在同一个对话里问进度时，它调用 `getTaskStatus`。`submitted` 只表示 webhook 收下了任务。Grok Bot 再用执行端钥匙把状态写成 `received`、`executing`、`waiting_approval`、`finished` 或 `failed`，摘要在 `summary` 里。只有 `finished` 或 `failed` 表示这单已经结束。
+
+默认把这些状态写在 `data/grok-status`。执行端钥匙是 `BOT_REPORT_KEY`，只放在 relay 的环境文件里，不要贴进聊天。执行 Bot 的说明要包含向 `/executor/tasks/<relay_task_id>/progress` 回报这一步。
+
 ## ChatGPT 和 Cursor
 
 同一个 ChatGPT 对话可以把手头的任务交给 Cursor，再把进度拿回来。你说「交给 Cursor」之后，如果这句话里没有点名仓库，ChatGPT 先问你：新建一个私有仓库，还是用下面列出的现有仓库。你选定之后，它才调用 `startCursorTask` 一次。选新建时不传仓库地址，中转会建一个私有 GitHub 仓库。选现有仓库时用那个地址，不再新建。
@@ -119,7 +125,7 @@ relay 的环境文件要增加 `CURSOR_API_KEY` 和 `CURSOR_GITHUB_TOKEN`。两�
 
 提交时带上 schema_version "1"、title、objective、completion_criteria、source。source 用当前平台名，例如 chatgpt、claude、grok、muse。说明较长时写成 Markdown，用 brief_url 指向它，不要把长文或源码塞进 JSON。dry_run 只有我要求连通测试时才设为 true。
 
-不要向我要 webhook 密钥。调用结果里，transportAccepted 只表示 webhook 收下了这次 POST。只有 botAcknowledged 为 true，或结果里真有 taskId，才能说 Grok Bot 确认了任务。失败或结果含糊时报告 HTTP 状态，不要自动重试。
+不要向我要 webhook 密钥。调用结果里，transportAccepted 只表示 webhook 收下了这次 POST。relayTaskId 用来查进度，不表示 Grok Bot 已经做完。我问进度时调用 getTaskStatus 一次，按返回的 status 和 summary 说明。只有 finished 或 failed 才能说这单结束。失败或结果含糊时不要自动重试。
 ```
 
 连通测试用准备好的 dry run，一次即可：标题 `relay-ping`，`dry_run` 为 true。看到 HTTP 状态之后停住。200 只说明 webhook 收了请求，不等于 Grok Bot 已经在对话里确认。

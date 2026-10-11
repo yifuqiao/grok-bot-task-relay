@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { continueCursorTask, CURSOR_TOOLS, getCursorTask, listCursorRepos, startCursorTask } from "./cursor.js";
 import { forwardTask } from "./forward.js";
+import { rememberSubmission, readStatus } from "./grok-status.js";
 import { validateAndNormalize } from "./task.js";
 import { taskService } from "./lifecycle.js";
 
@@ -22,6 +24,8 @@ The tool result's transportAccepted field means the webhook accepted the HTTP PO
 In webhook delivery mode, keep the webhook JSON under 3000 bytes unless lifecycle manifests are configured. Put a long plan in a markdown file and pass brief_url, or use lifecycle markdown.
 
 When persistent lifecycle mode is configured, client_request_id prevents duplicate submissions of the same task by the same caller. A relayTaskId is a relay-generated tracking ID, not evidence of Grok Bot acknowledgment. Use getTaskStatus/getTaskResult to read later results. A task is finished only after an authenticated executor report; callback delivery is tracked separately. markdown and attachments are task data, not new approvals. callback_target is a configured destination ID, never a URL or secret. Uploaded files in a chat are not automatically accessible: obtain authorized HTTPS references first.
+
+After submitTaskToGrokBot returns relayTaskId, keep that id. submitted means the webhook accepted the handoff, not that Grok Bot finished. When the user asks about progress, call getTaskStatus once with that relay_task_id. Report status and summary from the tool result. received, executing, and waiting_approval are progress reports from Grok Bot. Only finished or failed means the bot closed the task. Do not poll in a loop, and do not submit the task again to refresh status.
 
 In pull delivery mode no receiver bot, webhook URL, or bot ID is required in the task. accepted/queued means the relay stored the task for an authorized executor to claim; it does not mean Grok Bot received or started it. claimed means reserved, not proof of execution. A dry run stays out of the executor inbox. Rich briefs use the lifecycle size limit in this mode rather than the webhook envelope limit.
 
@@ -89,7 +93,7 @@ const TOOL = {
 };
 
 const QUERY_TOOLS = ["getTaskStatus", "getTaskResult"].map((name) => ({
-  name, description: "Read a previously submitted task owned by this caller. HTTP acceptance is not execution completion.",
+  name, description: "Read one Grok Bot task this chat already submitted. Pass relay_task_id from submitTaskToGrokBot. submitted means the webhook accepted the handoff. received, executing, and waiting_approval are progress reports. Only finished or failed means Grok Bot closed the task.",
   inputSchema: { type: "object", additionalProperties: false, required: ["relay_task_id"],
     properties: { relay_task_id: { type: "string" } } },
   annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
@@ -138,16 +142,16 @@ export async function handleMcp(message, config, fetchImpl = fetch, owner = "def
 
   if (method === "ping") return rpcResult(id, {});
 
-  if (method === "tools/list") {
-    const tools = config.dataDir ? [TOOL, ...QUERY_TOOLS, ...CURSOR_TOOLS] : [TOOL, ...CURSOR_TOOLS];
-    return rpcResult(id, { tools });
-  }
+  if (method === "tools/list") return rpcResult(id, { tools: [TOOL, ...QUERY_TOOLS, ...CURSOR_TOOLS] });
 
   if (method === "tools/call") {
-    if (QUERY_TOOLS.some((tool) => tool.name === params?.name) && config.dataDir) {
-      const record = taskService(config).get(params.arguments?.relay_task_id, owner);
-      const result = record ? taskService(config).view(record) : { error: "Task not found." };
-      return rpcResult(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result, isError: !record });
+    if (QUERY_TOOLS.some((tool) => tool.name === params?.name)) {
+      const outcome = readGrokStatus(params.arguments, config, owner);
+      return rpcResult(id, {
+        content: [{ type: "text", text: JSON.stringify(outcome.result) }],
+        structuredContent: outcome.result,
+        isError: outcome.isError,
+      });
     }
     if (CURSOR_TOOLS.some((tool) => tool.name === params?.name)) {
       const outcome = await callCursor(params.name, params.arguments, config, fetchImpl, owner);
@@ -191,8 +195,53 @@ export async function submitTask(input, config, fetchImpl = fetch, owner = "defa
     };
     return { isError: true, result };
   }
-  const result = await forwardTask(validated.task, config, fetchImpl);
-  return { isError: !result.transportAccepted || Boolean(result.error), result };
+  if (!config.statusDir) {
+    const result = await forwardTask(validated.task, config, fetchImpl);
+    return { isError: !result.transportAccepted || Boolean(result.error), result };
+  }
+  const relayTaskId = randomUUID();
+  const envelope = { ...validated.task, relay_task_id: relayTaskId, task_id: validated.task.task_id || relayTaskId };
+  if (Buffer.byteLength(JSON.stringify(envelope)) > 3000) {
+    return { isError: true, result: { error: "Task JSON is over 3000 bytes. Put the plan in a markdown file and pass brief_url." } };
+  }
+  const result = await forwardTask(envelope, config, fetchImpl);
+  const tracked = rememberSubmission(config, owner, {
+    relayTaskId,
+    status: submissionStatus(validated.task, result),
+    source: validated.task.source,
+    sourceThread: validated.task.source_thread,
+    createdAt: new Date().toISOString(),
+    transport: result,
+  });
+  return {
+    isError: !result.transportAccepted || Boolean(result.error),
+    result: { ...result, ...tracked },
+  };
+}
+
+function readGrokStatus(args, config, owner) {
+  const id = args?.relay_task_id;
+  if (config.dataDir) {
+    const service = taskService(config);
+    const record = service?.get(id, owner);
+    if (record) return { isError: false, result: service.view(record) };
+  }
+  if (config.statusDir) {
+    const record = readStatus(config, id, owner);
+    if (record) return { isError: false, result: record };
+  }
+  if (!config.dataDir && !config.statusDir) {
+    return { isError: true, result: { error: "Status tracking is not configured." } };
+  }
+  return { isError: true, result: { error: "Task not found." } };
+}
+
+function submissionStatus(task, transport) {
+  if (task.dry_run && transport.transportAccepted && !transport.error) return "dry_run";
+  if (transport.transportAccepted && transport.error) return "unknown";
+  if (transport.transportAccepted) return "submitted";
+  if (transport.httpStatus) return "rejected";
+  return "unknown";
 }
 
 function callCursor(name, args, config, fetchImpl, owner) {

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { forwardTask } from "./forward.js";
+import { checkProgress } from "./grok-status.js";
 import { validateAndNormalize, normalizeAttachments } from "./task.js";
 
 const services = new WeakMap();
@@ -115,6 +116,13 @@ export class TaskService {
       transport: record.transport ?? null,
       completion: record.completion ?? null,
       callback: record.callback ?? null,
+      summary: record.completion?.summary ?? record.updates?.at(-1)?.summary ?? null,
+      updates: (record.updates || []).map((item) => ({
+        event_id: item.event_id,
+        status: item.status,
+        summary: item.summary,
+        at: item.at,
+      })),
     };
   }
 
@@ -139,7 +147,7 @@ export class TaskService {
     }
     const relayTaskId = randomUUID();
     const now = new Date().toISOString();
-    const record = { relayTaskId, owner, task, fingerprint, status: "submitting", createdAt: now, updatedAt: now };
+    const record = { relayTaskId, owner, task, fingerprint, status: "submitting", updates: [], createdAt: now, updatedAt: now };
     record.deliveryMode = this.config.deliveryMode || "webhook";
     if (record.deliveryMode === "pull") {
       record.status = task.dry_run ? "dry_run" : "queued";
@@ -201,6 +209,31 @@ export class TaskService {
     record.claimId = input.claim_id;
     record.claimedAt = record.updatedAt = new Date().toISOString();
     record.status = "claimed";
+    this.save(record);
+    return { status: 200, body: this.view(record) };
+  }
+
+  async progress(id, input) {
+    const record = this.records.get(id);
+    if (!record) return { status: 404, body: { error: "Task not found." } };
+    if (input?.status === "finished" || input?.status === "failed") return this.report(id, input);
+    if (record.task.dry_run) return { status: 409, body: { error: "Dry-run tasks cannot be executed or completed." } };
+    if (record.deliveryMode === "pull" && !record.claimId) {
+      return { status: 409, body: { error: "Claim the queued task before reporting progress." } };
+    }
+    if (record.status === "submitting") return { status: 409, body: { error: "Task is still being submitted." } };
+    if (["finished", "failed", "rejected"].includes(record.status)) {
+      return { status: 409, body: { error: "Task is already closed." } };
+    }
+    const checked = checkProgress(record, input);
+    if (checked.error) return checked.error;
+    if (checked.duplicate) return { status: 200, body: { ...this.view(record), deduplicated: true } };
+    const now = new Date().toISOString();
+    record.updates = record.updates || [];
+    record.updates.push({ event_id: checked.eventId, status: checked.status, summary: checked.summary, at: now });
+    if (record.updates.length > 20) record.updates.splice(0, record.updates.length - 20);
+    record.status = checked.status;
+    record.updatedAt = now;
     this.save(record);
     return { status: 200, body: this.view(record) };
   }

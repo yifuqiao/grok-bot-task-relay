@@ -6,6 +6,7 @@ import { loadConfig, loadEnvFile } from "./env.js";
 import { handleMcp, submitTask } from "./mcp.js";
 import { createOAuth, publicBaseFrom } from "./oauth.js";
 import { isDirectRun, projectRoot } from "./stdio.js";
+import { progressStatus } from "./grok-status.js";
 import { taskService } from "./lifecycle.js";
 
 const MAX_BODY = 64 * 1024;
@@ -33,9 +34,22 @@ export function createRequestListener(config, fetchImpl = fetch) {
         if (!service) return sendJson(res, 503, { error: "Task lifecycle is not configured." });
         return sendJson(res, 200, { tasks: service.inbox() });
       }
-      const executor = url.pathname.match(/^\/executor\/tasks\/([a-f0-9-]{36})\/(manifest|report|claim)$/);
+      const executor = url.pathname.match(/^\/executor\/tasks\/([a-f0-9-]{36})\/(manifest|report|claim|progress)$/);
       if (executor) {
         if (!bearerMatches(req, config.botReportKey)) return sendJson(res, 401, { error: "Unauthorized." });
+        if (req.method === "POST" && executor[2] === "progress") {
+          const body = JSON.parse(await readBody(req));
+          const service = taskService(config);
+          if (service?.records.get(executor[1])) {
+            const outcome = await service.progress(executor[1], body);
+            return sendJson(res, outcome.status, outcome.body);
+          }
+          if (config.statusDir) {
+            const outcome = progressStatus(config, executor[1], body);
+            return sendJson(res, outcome.status, outcome.body);
+          }
+          return sendJson(res, 503, { error: "Task status is not configured." });
+        }
         const service = taskService(config);
         if (!service) return sendJson(res, 503, { error: "Task lifecycle is not configured." });
         const record = service.records.get(executor[1]);

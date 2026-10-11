@@ -48,6 +48,13 @@ export function loadConfig() {
       : "",
     publicBaseUrl: (process.env.RELAY_PUBLIC_BASE_URL || "").trim(),
     botReportKey: (process.env.BOT_REPORT_KEY || "").trim(),
+    statusDir: process.env.GROK_STATUS_DIR === ""
+      ? ""
+      : path.resolve(
+        path.dirname(fileURLToPath(import.meta.url)),
+        "..",
+        process.env.GROK_STATUS_DIR || path.join("data", "grok-status"),
+      ),
     clientKeys: jsonSetting("RELAY_CLIENT_KEYS"),
     callbackTargets: jsonSetting("RELAY_CALLBACK_TARGETS"),
     cursorApiKey: (process.env.CURSOR_API_KEY || "").trim(),

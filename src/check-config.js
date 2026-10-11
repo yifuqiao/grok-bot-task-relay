@@ -10,6 +10,7 @@ console.log(
     deliveryMode: config.deliveryMode,
     dataDir: config.dataDir ? "set" : "missing",
     botReportKey: config.botReportKey ? "set" : "missing",
+    statusDir: config.statusDir ? "set" : "missing",
     webhookRequired: config.deliveryMode === "webhook",
     webhookUrl: config.webhookUrl ? "set" : "missing",
     webhookKey: config.webhookKey ? "set" : "missing",
