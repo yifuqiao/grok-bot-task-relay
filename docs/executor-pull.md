@@ -2,6 +2,8 @@
 
 设置 RELAY_DELIVERY_MODE=pull，聊天平台使用原 submitTaskToGrokBot 或 POST /submit-task，服务将任务写入持久收件箱。调用方不需要选 Bot，也不需要 receiver webhook。默认仍为 webhook 模式。
 
+pull 模式只支持同一个 HTTP 服务：运行 `node src/http.js`（或 `npm run start:http`），MCP 客户端连接该服务的 `/mcp`，API 调用 `/submit-task`，执行端也连接该服务。`node src/stdio.js` / `npm start` 在 pull 模式下会直接拒绝启动，不接收任务、不创建记录或占用写入锁。不能同时启动 stdio 与 HTTP 共享数据目录；仅支持 stdio 的客户端需要另行使用 HTTP 代理，本项目未提供该代理。
+
 这是本 relay 的执行端接口，不是 Grok Bot 官方 API。尚未验证 Grok Bot 自动创建 Bot、唤醒 Bot、或动态选择 Bot 的接口，也没有实现此类能力。需要一个具备 HTTP 调用权限的执行端 worker，或经实际验证能够轮询的 Grok Bot skill/routine，领取任务并执行。只有配置收件箱而没有运行执行端时，任务会保持 queued。
 
 ## 一次连接配置
