@@ -23,8 +23,12 @@ export function loadEnvFile(filePath) {
 }
 
 export function loadConfig() {
+  const deliveryMode = (process.env.RELAY_DELIVERY_MODE || "webhook").trim();
+  if (!["webhook", "pull"].includes(deliveryMode)) throw new Error("RELAY_DELIVERY_MODE must be webhook or pull.");
+  if (deliveryMode === "pull" && !process.env.RELAY_DATA_DIR) throw new Error("Pull mode requires RELAY_DATA_DIR.");
   const scheme = process.env.GROK_BOT_WEBHOOK_AUTH_SCHEME;
   return {
+    deliveryMode,
     webhookUrl: (process.env.GROK_BOT_WEBHOOK_URL || "").trim(),
     webhookKey: (process.env.GROK_BOT_WEBHOOK_KEY || "").trim(),
     authHeader: (process.env.GROK_BOT_WEBHOOK_AUTH_HEADER || "authorization")
