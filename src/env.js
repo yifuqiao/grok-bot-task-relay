@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
@@ -37,5 +39,36 @@ export function loadConfig() {
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean),
+    dataDir: process.env.RELAY_DATA_DIR
+      ? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", process.env.RELAY_DATA_DIR)
+      : "",
+    publicBaseUrl: (process.env.RELAY_PUBLIC_BASE_URL || "").trim(),
+    botReportKey: (process.env.BOT_REPORT_KEY || "").trim(),
+    clientKeys: jsonSetting("RELAY_CLIENT_KEYS"),
+    callbackTargets: jsonSetting("RELAY_CALLBACK_TARGETS"),
   };
+}
+
+function jsonSetting(name) {
+  try {
+    const value = JSON.parse(process.env[name] || "{}");
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+    if (name === "RELAY_CLIENT_KEYS") {
+      for (const [owner, key] of Object.entries(value)) {
+        if (!owner || typeof key !== "string" || !key.trim() || key.trim() !== key || /\s/.test(key)) throw new Error();
+      }
+      const keys = Object.values(value);
+      if (new Set(keys).size !== keys.length || keys.includes((process.env.RELAY_API_KEY || "").trim())) throw new Error();
+    } else {
+      for (const target of Object.values(value)) {
+        const url = new URL(target.url);
+        if (url.protocol !== "https:" || url.username || url.password ||
+          typeof target.owner !== "string" || !target.owner ||
+          (target.apiKey !== undefined && typeof target.apiKey !== "string")) throw new Error();
+      }
+    }
+    return value;
+  } catch {
+    throw new Error(`${name} has invalid configuration. Values are not printed.`);
+  }
 }
