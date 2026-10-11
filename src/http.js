@@ -206,6 +206,7 @@ function sendRelease(res) {
 }
 
 function relayStatus(result) {
+  if (result.deduplicated && result.status === "submitting") return 202;
   if (result.submitted) return 200;
   if (result.error && result.error.startsWith("Webhook URL")) return 503;
   if (result.error && result.error.includes("failed before")) return 502;
