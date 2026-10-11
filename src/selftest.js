@@ -150,7 +150,8 @@ await check("timeout during a real response body keeps HTTP 200 without another 
     const result = await forwardTask(ping, {
       webhookUrl: `http://127.0.0.1:${server.address().port}/hook`,
       webhookKey,
-      timeoutMs: 100,
+      // Leave time for CI's cold fetch startup; the body deliberately never completes.
+      timeoutMs: 2000,
     });
     assert.equal(calls, 1);
     assert.equal(result.httpStatus, 200);
