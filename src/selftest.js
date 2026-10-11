@@ -1,0 +1,308 @@
+import assert from "node:assert/strict";
+import http from "node:http";
+import { detectAck, forwardTask } from "./forward.js";
+import { createRequestListener } from "./http.js";
+import { handleMcp } from "./mcp.js";
+import { validateAndNormalize } from "./task.js";
+
+const webhookKey = "webhook-key-test-value";
+const relayKey = "relay-key-test-value";
+
+const ping = {
+  schema_version: "1",
+  title: "relay-ping",
+  objective: "Confirm webhook delivery to New Bot",
+  context: "Connectivity test from the local relay self-test",
+  completion_criteria: ["Bot acks in Grok Bot chat with task_id"],
+  priority: "normal",
+  source: "selftest",
+  dry_run: true,
+};
+
+const failures = [];
+
+function check(name, fn) {
+  return Promise.resolve()
+    .then(fn)
+    .then(() => console.log(`ok ${name}`))
+    .catch((error) => {
+      failures.push(name);
+      console.error(`fail ${name}: ${error instanceof Error ? error.message : error}`);
+    });
+}
+
+await check("rejects an incomplete task", () => {
+  const result = validateAndNormalize({ title: "x" });
+  assert.equal(result.ok, false);
+});
+
+await check("rejects a plan that is too large for the webhook", () => {
+  const result = validateAndNormalize({
+    ...ping,
+    context: "x".repeat(4000),
+  });
+  assert.equal(result.ok, false);
+});
+
+await check("normalizes the dry-run ping", () => {
+  const result = validateAndNormalize(ping);
+  assert.equal(result.ok, true);
+  assert.equal(result.task.dry_run, true);
+  assert.equal(result.task.schema_version, "1");
+});
+
+await check("does not treat a generic acceptance body as a bot ack", () => {
+  const ack = detectAck({ ok: true, message: "accepted" });
+  assert.equal(ack.acknowledged, false);
+  assert.equal(ack.taskId, null);
+});
+
+await check("records a task id only when the response contains one", () => {
+  const ack = detectAck({ task_id: "task-123" });
+  assert.equal(ack.acknowledged, true);
+  assert.equal(ack.taskId, "task-123");
+});
+
+const fake = await startFakeWebhook();
+
+await check("missing webhook config does not send", async () => {
+  const result = await forwardTask(ping, { webhookUrl: "", webhookKey: "" }, fake.fetch);
+  assert.equal(result.submitted, false);
+  assert.equal(result.httpStatus, null);
+  assert.equal(fake.count, 0);
+});
+
+await check("sends one dry run and keeps the webhook key out of the result", async () => {
+  const before = fake.count;
+  const result = await forwardTask(
+    ping,
+    {
+      webhookUrl: fake.url,
+      webhookKey,
+      authHeader: "authorization",
+      authScheme: "Bearer",
+      timeoutMs: 3000,
+    },
+    fake.fetch,
+  );
+  assert.equal(fake.count, before + 1);
+  assert.equal(result.transportAccepted, true);
+  assert.equal(result.botAcknowledged, false);
+  assert.equal(result.httpStatus, 200);
+  assert.equal(result.dry_run, true);
+  assert.equal(fake.lastBody.dry_run, true);
+  assert.equal(fake.lastAuth, `Bearer ${webhookKey}`);
+  assert.equal(JSON.stringify(result).includes(webhookKey), false);
+});
+
+await check("redacts a webhook key echoed by the response", async () => {
+  fake.nextBody = { echo: webhookKey, ok: true };
+  const result = await forwardTask(
+    ping,
+    {
+      webhookUrl: fake.url,
+      webhookKey,
+      authHeader: "authorization",
+      authScheme: "Bearer",
+      timeoutMs: 3000,
+    },
+  );
+  assert.equal(result.response.echo, "[redacted]");
+  assert.equal(JSON.stringify(result).includes(webhookKey), false);
+  fake.nextBody = { ok: true };
+});
+
+await check("does not follow a redirect or send a second request", async () => {
+  fake.nextStatus = 302;
+  const before = fake.count;
+  const result = await forwardTask(
+    ping,
+    {
+      webhookUrl: fake.url,
+      webhookKey,
+      authHeader: "authorization",
+      authScheme: "Bearer",
+      timeoutMs: 3000,
+    },
+    fake.fetch,
+  );
+  assert.equal(fake.count, before + 1);
+  assert.equal(result.transportAccepted, false);
+  assert.equal(result.httpStatus, 302);
+  assert.equal(result.botAcknowledged, false);
+  fake.nextStatus = 200;
+});
+
+await check("MCP lists submitTaskToGrokBot and returns transport status", async () => {
+  fake.nextBody = { ok: true };
+  const listed = await handleMcp(
+    { jsonrpc: "2.0", id: 1, method: "tools/list" },
+    { webhookUrl: fake.url, webhookKey, authScheme: "Bearer", timeoutMs: 3000 },
+  );
+  assert.equal(listed.result.tools[0].name, "submitTaskToGrokBot");
+
+  const called = await handleMcp(
+    {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "submitTaskToGrokBot", arguments: ping },
+    },
+    { webhookUrl: fake.url, webhookKey, authScheme: "Bearer", timeoutMs: 3000 },
+  );
+  assert.equal(called.result.isError, false);
+  assert.equal(called.result.structuredContent.transportAccepted, true);
+  assert.equal(called.result.structuredContent.botAcknowledged, false);
+  assert.equal(called.result.structuredContent.httpStatus, 200);
+});
+
+await check("MCP reports an observed task id as acknowledgment evidence", async () => {
+  fake.nextBody = { task_id: "observed-1" };
+  const called = await handleMcp(
+    {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "submitTaskToGrokBot", arguments: ping },
+    },
+    { webhookUrl: fake.url, webhookKey, authScheme: "Bearer", timeoutMs: 3000 },
+  );
+  assert.equal(called.result.structuredContent.botAcknowledged, true);
+  assert.equal(called.result.structuredContent.taskId, "observed-1");
+  assert.equal(called.result.structuredContent.acknowledgment, "task_id");
+});
+
+await check("HTTP submit requires the relay key and posts once", async () => {
+  const config = {
+    webhookUrl: fake.url,
+    webhookKey,
+    relayApiKey: relayKey,
+    authHeader: "authorization",
+    authScheme: "Bearer",
+    timeoutMs: 3000,
+    host: "127.0.0.1",
+    port: 8787,
+    allowedOrigins: [],
+  };
+  const server = http.createServer(createRequestListener(config));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = address.port;
+  config.port = port;
+  const endpoint = `http://127.0.0.1:${port}/submit-task`;
+  const before = fake.count;
+  fake.nextBody = { ok: true };
+
+  const denied = await fetch(endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/json", host: `127.0.0.1:${port}` },
+    body: JSON.stringify(ping),
+  });
+  assert.equal(denied.status, 401);
+  assert.equal(fake.count, before);
+
+  const accepted = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${relayKey}`,
+      host: `127.0.0.1:${port}`,
+    },
+    body: JSON.stringify(ping),
+  });
+  const payload = await accepted.json();
+  assert.equal(accepted.status, 200);
+  assert.equal(fake.count, before + 1);
+  assert.equal(payload.transportAccepted, true);
+  assert.equal(payload.botAcknowledged, false);
+  assert.equal(JSON.stringify(payload).includes(webhookKey), false);
+  assert.equal(JSON.stringify(payload).includes(relayKey), false);
+  const tunneled = await requestLocal(port, {
+    method: "GET",
+    path: "/health",
+    headers: { host: "example.trycloudflare.com" },
+  });
+  assert.equal(tunneled.status, 200);
+
+  const rebound = await requestLocal(port, {
+    method: "GET",
+    path: "/health",
+    headers: { host: "evil.example", origin: "https://evil.example" },
+  });
+  assert.equal(rebound.status, 403);
+  server.close();
+});
+
+await new Promise((resolve) => fake.server.close(resolve));
+
+if (failures.length) {
+  console.error(`\n${failures.length} failed`);
+  process.exit(1);
+}
+console.log("\nall checks passed");
+
+function requestLocal(port, options) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ hostname: "127.0.0.1", port, ...options }, (res) => {
+      res.resume();
+      res.on("end", () => resolve({ status: res.statusCode }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+function startFakeWebhook() {
+  const state = {
+    count: 0,
+    lastBody: null,
+    lastAuth: "",
+    nextStatus: 200,
+    nextBody: { ok: true },
+  };
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      state.count += 1;
+      state.lastAuth = String(req.headers.authorization || "");
+      state.lastBody = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      if (state.nextStatus === 302) {
+        res.writeHead(302, { location: "http://127.0.0.1/not-followed" });
+        res.end();
+        return;
+      }
+      const payload = JSON.stringify(state.nextBody);
+      res.writeHead(state.nextStatus, {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(payload),
+      });
+      res.end(payload);
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve({
+        server,
+        url: `http://127.0.0.1:${address.port}/hook`,
+        fetch,
+        get count() {
+          return state.count;
+        },
+        get lastBody() {
+          return state.lastBody;
+        },
+        get lastAuth() {
+          return state.lastAuth;
+        },
+        set nextStatus(value) {
+          state.nextStatus = value;
+        },
+        set nextBody(value) {
+          state.nextBody = value;
+        },
+      });
+    });
+  });
+}
