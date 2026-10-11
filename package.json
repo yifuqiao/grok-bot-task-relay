@@ -1,0 +1,16 @@
+{
+  "name": "grok-bot-task-relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Hand approved tasks from chat tools to the Grok Bot task webhook.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/stdio.js",
+    "start:http": "node src/http.js",
+    "check": "node src/check-config.js",
+    "test": "node src/selftest.js"
+  }
+}
