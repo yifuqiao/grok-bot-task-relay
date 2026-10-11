@@ -6,8 +6,9 @@ import { loadConfig, loadEnvFile } from "./env.js";
 import { handleMcp, SERVER_VERSION, submitTask } from "./mcp.js";
 import { createOAuth, publicBaseFrom } from "./oauth.js";
 import { isDirectRun, projectRoot } from "./stdio.js";
-import { progressStatus } from "./grok-status.js";
+import { progressStatus, readStatus } from "./grok-status.js";
 import { taskService } from "./lifecycle.js";
+import { withReceipt } from "./receipt.js";
 
 const MAX_BODY = 64 * 1024;
 
@@ -73,15 +74,27 @@ export function createRequestListener(config, fetchImpl = fetch) {
         const owner = caller(req, config, oauth);
         if (owner === null) return sendJson(res, 401, { error: "Unauthorized." });
         const service = taskService(config);
-        if (!service) return sendJson(res, 503, { error: "Task lifecycle is not configured." });
-        const record = service.get(taskRoute[1], owner);
-        if (!record) return sendJson(res, 404, { error: "Task not found." });
-        if (req.method === "POST" && taskRoute[2] === "notify") {
-          const outcome = await service.notify(record.relayTaskId, owner);
-          return sendJson(res, outcome.status, outcome.body);
+        if (service) {
+          const record = service.get(taskRoute[1], owner);
+          if (!record) return sendJson(res, 404, { error: "Task not found." });
+          if (req.method === "POST" && taskRoute[2] === "notify") {
+            const outcome = await service.notify(record.relayTaskId, owner);
+            return sendJson(res, outcome.status, outcome.body);
+          }
+          if (req.method === "GET" && taskRoute[2] !== "notify") {
+            return sendJson(res, 200, withReceipt(service.view(record)));
+          }
+          return sendJson(res, 405, { error: "Method not allowed." });
         }
-        if (req.method === "GET" && taskRoute[2] !== "notify") return sendJson(res, 200, service.view(record));
-        return sendJson(res, 405, { error: "Method not allowed." });
+        if (config.statusDir && req.method === "GET" && taskRoute[2] !== "notify") {
+          const record = readStatus(config, taskRoute[1], owner);
+          if (!record) return sendJson(res, 404, { error: "Task not found." });
+          return sendJson(res, 200, withReceipt(record));
+        }
+        if (req.method === "POST" && taskRoute[2] === "notify") {
+          return sendJson(res, 503, { error: "Task lifecycle is not configured." });
+        }
+        return sendJson(res, 503, { error: "Task status is not configured." });
       }
       if (req.method === "GET" && url.pathname === "/health") {
         return sendJson(res, 200, {
