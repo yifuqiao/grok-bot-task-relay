@@ -50,6 +50,8 @@ export function loadConfig() {
     botReportKey: (process.env.BOT_REPORT_KEY || "").trim(),
     clientKeys: jsonSetting("RELAY_CLIENT_KEYS"),
     callbackTargets: jsonSetting("RELAY_CALLBACK_TARGETS"),
+    cursorApiKey: (process.env.CURSOR_API_KEY || "").trim(),
+    cursorGithubToken: (process.env.CURSOR_GITHUB_TOKEN || "").trim(),
   };
 }
 
