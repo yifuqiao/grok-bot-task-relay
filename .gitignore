@@ -1,0 +1,7 @@
+node_modules/
+.env
+*.log
+release.tgz
+sync-out.tgz
+*.env.out
+.DS_Store
