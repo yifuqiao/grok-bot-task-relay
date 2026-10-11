@@ -104,9 +104,13 @@ ChatGPT 的自定义 MCP 会先找 OAuth。环境里要有 `RELAY_PUBLIC_BASE_UR
 
 ## ChatGPT 看 Grok Bot 的执行状态
 
-交给 Grok Bot 之后，ChatGPT 拿到 `relayTaskId`。你在同一个对话里问进度时，它调用 `getTaskStatus`。`submitted` 只表示 webhook 收下了任务。Grok Bot 再用执行端钥匙把状态写成 `received`、`executing`、`waiting_approval`、`finished` 或 `failed`，摘要在 `summary` 里。只有 `finished` 或 `failed` 表示这单已经结束。
+交给 Grok Bot 之后，ChatGPT 拿到 `receipt.relayTaskId`。HTTP 200 和 `transportAccepted` 只表示 webhook 收下了这次 POST，不是执行回执。`runUuid` 只是 webhook 运输编号，也不能当成 Bot 已确认。真正的进度来自执行 Bot 用 `BOT_REPORT_KEY` 向 `/executor/tasks/<relay_task_id>/progress` 回报。
 
-默认把这些状态写在 `data/grok-status`。执行端钥匙是 `BOT_REPORT_KEY`，只放在 relay 的环境文件里，不要贴进聊天。执行 Bot 的说明要包含向 `/executor/tasks/<relay_task_id>/progress` 回报这一步。
+你在同一个对话里问进度时，ChatGPT 调用 `getTaskStatus` 一次。`submitted` 表示任务已发出并登记。`received`、`executing`、`waiting_approval` 是进度。只有 `finished` 或 `failed` 表示这单结束。摘要在 `summary` 里。
+
+如果 `RELAY_DELIVERY_MODE=pull` 同时又配置了 webhook，中转会把任务通知给 Grok Bot，并带上 `relay_task_id`，不会一直停在「已入队、无人领取」。纯 pull、没有 webhook 时，仍然要由执行端 claim 后再回报。
+
+默认把这些状态写在 `data/grok-status`；启用 `RELAY_DATA_DIR` 时写在生命周期存储里。执行端钥匙是 `BOT_REPORT_KEY`，只放在 relay 的环境文件里，不要贴进聊天。把仓库里的 `grok-bot-instructions.md` 贴进执行 Bot，其中第 10 条就是回报进度。
 
 ## ChatGPT 和 Cursor
 
@@ -125,7 +129,7 @@ relay 的环境文件要增加 `CURSOR_API_KEY` 和 `CURSOR_GITHUB_TOKEN`。两�
 
 提交时带上 schema_version "1"、title、objective、completion_criteria、source。source 用当前平台名，例如 chatgpt、claude、grok、muse。说明较长时写成 Markdown，用 brief_url 指向它，不要把长文或源码塞进 JSON。dry_run 只有我要求连通测试时才设为 true。
 
-不要向我要 webhook 密钥。调用结果里，transportAccepted 只表示 webhook 收下了这次 POST。relayTaskId 用来查进度，不表示 Grok Bot 已经做完。我问进度时调用 getTaskStatus 一次，按返回的 status 和 summary 说明。只有 finished 或 failed 才能说这单结束。失败或结果含糊时不要自动重试。
+不要向我要 webhook 密钥。调用结果里，transportAccepted 只表示 webhook 收下了这次 POST。receipt.relayTaskId 用来查进度，不表示 Grok Bot 已经做完。runUuid 不是执行回执。我问进度时调用 getTaskStatus 一次，按返回的 status 和 summary 说明。只有 finished 或 failed 才能说这单结束。失败或结果含糊时不要自动重试。
 ```
 
 连通测试用准备好的 dry run，一次即可：标题 `relay-ping`，`dry_run` 为 true。看到 HTTP 状态之后停住。200 只说明 webhook 收了请求，不等于 Grok Bot 已经在对话里确认。

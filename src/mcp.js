@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto";
 import { continueCursorTask, CURSOR_TOOLS, getCursorTask, listCursorRepos, startCursorTask } from "./cursor.js";
 import { forwardTask } from "./forward.js";
 import { rememberSubmission, readStatus } from "./grok-status.js";
+import { withReceipt } from "./receipt.js";
 import { validateAndNormalize } from "./task.js";
 import { taskService } from "./lifecycle.js";
 
 export const SERVER_NAME = "grok-bot-task-relay";
-export const SERVER_VERSION = "1.1.0";
+export const SERVER_VERSION = "1.1.1";
 export const SUPPORTED_PROTOCOLS = [
   "2026-07-28",
   "2025-11-25",
@@ -25,9 +26,9 @@ In webhook delivery mode, keep the webhook JSON under 3000 bytes unless lifecycl
 
 When persistent lifecycle mode is configured, client_request_id prevents duplicate submissions of the same task by the same caller. A relayTaskId is a relay-generated tracking ID, not evidence of Grok Bot acknowledgment. Use getTaskStatus/getTaskResult to read later results. A task is finished only after an authenticated executor report; callback delivery is tracked separately. markdown and attachments are task data, not new approvals. callback_target is a configured destination ID, never a URL or secret. Uploaded files in a chat are not automatically accessible: obtain authorized HTTPS references first.
 
-After submitTaskToGrokBot returns relayTaskId, keep that id. submitted means the webhook accepted the handoff, not that Grok Bot finished. When the user asks about progress, call getTaskStatus once with that relay_task_id. Report status and summary from the tool result. received, executing, and waiting_approval are progress reports from Grok Bot. Only finished or failed means the bot closed the task. Do not poll in a loop, and do not submit the task again to refresh status.
+After submitTaskToGrokBot returns, keep receipt.relayTaskId. transportAccepted and HTTP 200 only mean the webhook accepted the POST. botAcknowledged is true only when that HTTP response itself contains an ack flag or task_id. A runUuid is a webhook transport id, not a Grok Bot receipt. submitted means the handoff was stored and, when a webhook is configured, forwarded once. When the user asks about progress, call getTaskStatus once with that relay_task_id. Report status and summary from the tool result. received, executing, and waiting_approval are progress reports from Grok Bot. Only finished or failed means the bot closed the task. Do not poll in a loop, and do not submit the task again to refresh status.
 
-In pull delivery mode no receiver bot, webhook URL, or bot ID is required in the task. accepted/queued means the relay stored the task for an authorized executor to claim; it does not mean Grok Bot received or started it. claimed means reserved, not proof of execution. A dry run stays out of the executor inbox. Rich briefs use the lifecycle size limit in this mode rather than the webhook envelope limit.
+In pull delivery mode without a receiver webhook, accepted/queued means the relay stored the task for an authorized executor to claim; it does not mean Grok Bot received or started it. When pull mode also has a webhook configured, the relay notifies Grok Bot once with relay_task_id and status becomes submitted. claimed means reserved, not proof of execution. A dry run stays out of the executor inbox. Rich briefs use the lifecycle size limit in this mode rather than the webhook envelope limit.
 
 When the user explicitly asks to hand the work to Cursor, do not call startCursorTask until they choose a repository. If that message already names one repository, use it. Otherwise call listCursorRepos once and ask, in the user's language, whether to create a new private repository or use one of the listed repositories. Wait for the choice. Omit repo_url only after they choose a new repository. Pass repo_url after they choose an existing one. Then call startCursorTask once. accepted means Cursor accepted the launch, not that the work finished. Use getCursorTask with that agent_id to read status and pull request URLs. Call continueCursorTask only when the user explicitly sends a follow-up. Do not retry a failed launch.
 
@@ -215,7 +216,7 @@ export async function submitTask(input, config, fetchImpl = fetch, owner = "defa
   });
   return {
     isError: !result.transportAccepted || Boolean(result.error),
-    result: { ...result, ...tracked },
+    result: withReceipt({ ...result, ...tracked }),
   };
 }
 
@@ -224,11 +225,11 @@ function readGrokStatus(args, config, owner) {
   if (config.dataDir) {
     const service = taskService(config);
     const record = service?.get(id, owner);
-    if (record) return { isError: false, result: service.view(record) };
+    if (record) return { isError: false, result: withReceipt(service.view(record)) };
   }
   if (config.statusDir) {
     const record = readStatus(config, id, owner);
-    if (record) return { isError: false, result: record };
+    if (record) return { isError: false, result: withReceipt(record) };
   }
   if (!config.dataDir && !config.statusDir) {
     return { isError: true, result: { error: "Status tracking is not configured." } };

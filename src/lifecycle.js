@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { forwardTask } from "./forward.js";
 import { checkProgress } from "./grok-status.js";
+import { withReceipt } from "./receipt.js";
 import { validateAndNormalize, normalizeAttachments } from "./task.js";
 
 const services = new WeakMap();
@@ -142,19 +143,35 @@ export class TaskService {
         return { isError: true, result: { error: "client_request_id was already used with different task contents." } };
       }
       return { isError: Boolean(previous.transport?.error) || previous.status === "unknown",
-        result: { ...(previous.transport ?? {}), ...this.view(previous),
-          ...(previous.deliveryMode === "pull" ? { accepted: true } : {}), deduplicated: true } };
+        result: withReceipt({ ...(previous.transport ?? {}), ...this.view(previous),
+          ...(previous.deliveryMode === "pull" ? { accepted: true } : {}),
+          deduplicated: true }) };
     }
     const relayTaskId = randomUUID();
     const now = new Date().toISOString();
     const record = { relayTaskId, owner, task, fingerprint, status: "submitting", updates: [], createdAt: now, updatedAt: now };
     record.deliveryMode = this.config.deliveryMode || "webhook";
     if (record.deliveryMode === "pull") {
-      record.status = task.dry_run ? "dry_run" : "queued";
+      if (task.dry_run) {
+        record.status = "dry_run";
+        this.save(record);
+        if (dedupeKey) this.dedupe.set(dedupeKey, relayTaskId);
+        return { isError: false, result: withReceipt({ accepted: true, ...this.view(record) }) };
+      }
+      // Pull inbox alone leaves tasks queued. When a receiver webhook is configured,
+      // notify Grok Bot once with relay_task_id so ChatGPT can read later progress.
+      if (this.config.webhookUrl && this.config.webhookKey) {
+        return this.deliverWebhook(record, task, relayTaskId, dedupeKey, fetchImpl);
+      }
+      record.status = "queued";
       this.save(record);
       if (dedupeKey) this.dedupe.set(dedupeKey, relayTaskId);
-      return { isError: false, result: { accepted: true, ...this.view(record) } };
+      return { isError: false, result: withReceipt({ accepted: true, ...this.view(record) }) };
     }
+    return this.deliverWebhook(record, task, relayTaskId, dedupeKey, fetchImpl);
+  }
+
+  async deliverWebhook(record, task, relayTaskId, dedupeKey, fetchImpl) {
     const envelope = { ...task, task_id: task.task_id ?? relayTaskId, relay_task_id: relayTaskId };
     delete envelope.callback_target;
     delete envelope.client_request_id;
@@ -182,8 +199,14 @@ export class TaskService {
     }
     current.updatedAt = new Date().toISOString();
     this.save(current);
-    return { isError: !transport.transportAccepted || Boolean(transport.error),
-      result: { ...transport, ...this.view(current) } };
+    return {
+      isError: !transport.transportAccepted || Boolean(transport.error),
+      result: withReceipt({ ...transport, ...this.view(current) }),
+    };
+  }
+
+  webhookNotified(record) {
+    return Boolean(record?.transport?.transportAccepted);
   }
 
   inbox() {
@@ -218,7 +241,7 @@ export class TaskService {
     if (!record) return { status: 404, body: { error: "Task not found." } };
     if (input?.status === "finished" || input?.status === "failed") return this.report(id, input);
     if (record.task.dry_run) return { status: 409, body: { error: "Dry-run tasks cannot be executed or completed." } };
-    if (record.deliveryMode === "pull" && !record.claimId) {
+    if (record.deliveryMode === "pull" && !record.claimId && !this.webhookNotified(record)) {
       return { status: 409, body: { error: "Claim the queued task before reporting progress." } };
     }
     if (record.status === "submitting") return { status: 409, body: { error: "Task is still being submitted." } };
@@ -227,7 +250,7 @@ export class TaskService {
     }
     const checked = checkProgress(record, input);
     if (checked.error) return checked.error;
-    if (checked.duplicate) return { status: 200, body: { ...this.view(record), deduplicated: true } };
+    if (checked.duplicate) return { status: 200, body: withReceipt({ ...this.view(record), deduplicated: true }) };
     const now = new Date().toISOString();
     record.updates = record.updates || [];
     record.updates.push({ event_id: checked.eventId, status: checked.status, summary: checked.summary, at: now });
@@ -235,21 +258,21 @@ export class TaskService {
     record.status = checked.status;
     record.updatedAt = now;
     this.save(record);
-    return { status: 200, body: this.view(record) };
+    return { status: 200, body: withReceipt(this.view(record)) };
   }
 
   async report(id, input) {
     const record = this.records.get(id);
     if (!record) return { status: 404, body: { error: "Task not found." } };
     if (record.task.dry_run) return { status: 409, body: { error: "Dry-run tasks cannot be executed or completed." } };
-    if (record.deliveryMode === "pull" && !record.claimId) {
+    if (record.deliveryMode === "pull" && !record.claimId && !this.webhookNotified(record)) {
       return { status: 409, body: { error: "Claim the queued task before reporting completion." } };
     }
     const errors = [];
     if (!input || typeof input !== "object" || Array.isArray(input)) {
       return { status: 400, body: { error: "Report must be an object." } };
     }
-    if (record.deliveryMode === "pull" && input.claim_id !== record.claimId) {
+    if (record.deliveryMode === "pull" && record.claimId && input.claim_id !== record.claimId) {
       return { status: 409, body: { error: "Completion report must match the task claim_id." } };
     }
     if (typeof input.event_id !== "string" || !input.event_id.trim() || input.event_id.length > 120) errors.push("event_id is required (max 120 characters).");
@@ -262,7 +285,7 @@ export class TaskService {
       if (JSON.stringify(record.completion) !== JSON.stringify(completion)) {
         return { status: 409, body: { error: "A different terminal report already exists." } };
       }
-      return { status: 200, body: { ...this.view(record), deduplicated: true } };
+      return { status: 200, body: withReceipt({ ...this.view(record), deduplicated: true }) };
     }
     if (record.status === "rejected") return { status: 409, body: { error: "Task was rejected by the webhook." } };
     record.completion = completion;
@@ -271,7 +294,7 @@ export class TaskService {
     if (record.task.callback_target) record.callback = { status: "pending", attempts: 0, httpStatus: null };
     this.save(record);
     await this.notify(id, record.owner);
-    return { status: 200, body: this.view(record) };
+    return { status: 200, body: withReceipt(this.view(record)) };
   }
 
   async notify(id, owner, fetchImpl = fetch) {

@@ -115,3 +115,69 @@ try {
   assert.equal(path.dirname(dryDir), os.tmpdir());
   fs.rmSync(dryDir, { recursive: true, force: true });
 }
+
+const notifyDir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-pull-notify-"));
+const notifyConfig = {
+  deliveryMode: "pull",
+  dataDir: notifyDir,
+  botReportKey: "fake-executor-key",
+  relayApiKey: "fake-caller-key",
+  clientKeys: {},
+  callbackTargets: {},
+  webhookUrl: "https://example.test/hook",
+  webhookKey: "fake-webhook-key",
+  authHeader: "authorization",
+  authScheme: "Bearer",
+  timeoutMs: 3000,
+  host: "127.0.0.1",
+  allowedOrigins: [],
+};
+let notified = 0;
+const notifyServer = http.createServer(createRequestListener(notifyConfig, async (_url, init) => {
+  notified += 1;
+  const body = JSON.parse(init.body);
+  assert.match(body.relay_task_id, /^[a-f0-9-]{36}$/);
+  return new Response(JSON.stringify({ ok: true, runUuid: "run-from-webhook" }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}));
+await new Promise((resolve) => notifyServer.listen(0, "127.0.0.1", resolve));
+const notifyBase = `http://127.0.0.1:${notifyServer.address().port}`;
+try {
+  const submitted = await fetch(`${notifyBase}/submit-task`, {
+    method: "POST",
+    headers: { authorization: "Bearer fake-caller-key", "content-type": "application/json" },
+    body: JSON.stringify({
+      title: "Notify pull task",
+      objective: "Reach Grok Bot even in pull mode",
+      source: "chatgpt",
+      completion_criteria: ["Bot can report progress"],
+    }),
+  });
+  const body = await submitted.json();
+  assert.equal(submitted.status, 200);
+  assert.equal(notified, 1);
+  assert.equal(body.status, "submitted");
+  assert.equal(body.transportAccepted, true);
+  assert.equal(body.botAcknowledged, false);
+  assert.equal(body.runUuid, "run-from-webhook");
+  assert.equal(body.receipt.relayTaskId, body.relayTaskId);
+  assert.equal(body.receipt.statusTool, "getTaskStatus");
+  const notifyService = taskService(notifyConfig);
+  assert.equal(notifyService.inbox().length, 0);
+  const progress = await fetch(`${notifyBase}/executor/tasks/${body.relayTaskId}/progress`, {
+    method: "POST",
+    headers: { authorization: "Bearer fake-executor-key", "content-type": "application/json" },
+    body: JSON.stringify({ event_id: "recv-1", status: "received", summary: "Got the task." }),
+  });
+  assert.equal(progress.status, 200);
+  assert.equal((await progress.json()).status, "received");
+  console.log("ok pull mode with webhook notifies Grok Bot and accepts progress without claim");
+} finally {
+  notifyServer.closeAllConnections();
+  await new Promise((resolve) => notifyServer.close(resolve));
+  taskService(notifyConfig).close();
+  assert.equal(path.dirname(notifyDir), os.tmpdir());
+  fs.rmSync(notifyDir, { recursive: true, force: true });
+}

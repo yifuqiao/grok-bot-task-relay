@@ -89,6 +89,7 @@ export function createRequestListener(config, fetchImpl = fetch) {
           version: SERVER_VERSION,
           deliveryMode: config.deliveryMode || "webhook",
           webhookConfigured: Boolean(config.webhookUrl && config.webhookKey),
+          statusReports: Boolean(config.botReportKey && (config.dataDir || config.statusDir)),
         });
       }
 
