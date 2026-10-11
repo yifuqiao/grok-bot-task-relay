@@ -75,6 +75,7 @@ export async function forwardTask(task, config, fetchImpl = fetch) {
     acknowledgment: ack.acknowledgment,
     httpStatus: response.status,
     taskId: ack.taskId,
+    runUuid: extractRunUuid(body),
     response: body,
     error: accepted ? null : `Webhook rejected the task with HTTP ${response.status}.`,
   });
@@ -110,11 +111,18 @@ function baseResult(task, overrides) {
     acknowledgment: "none",
     httpStatus: null,
     taskId: null,
+    runUuid: null,
     dry_run: task.dry_run === true,
     response: null,
     error: null,
     ...overrides,
   };
+}
+
+function extractRunUuid(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const value = body.runUuid ?? body.run_uuid;
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, 120) : null;
 }
 
 export function detectAck(value) {

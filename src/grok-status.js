@@ -24,6 +24,7 @@ export function rememberSubmission(config, owner, fields) {
       botAcknowledged: fields.transport.botAcknowledged === true,
       httpStatus: fields.transport.httpStatus ?? null,
       taskId: fields.transport.taskId ?? null,
+      runUuid: fields.transport.runUuid ?? null,
       error: fields.transport.error ?? null,
     },
   };

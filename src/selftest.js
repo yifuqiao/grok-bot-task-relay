@@ -54,6 +54,12 @@ await check("normalizes the dry-run ping", () => {
   assert.equal(result.task.schema_version, "1");
 });
 
+await check("keeps runUuid as transport metadata without treating it as an acknowledgment", () => {
+  const ack = detectAck({ ok: true, runUuid: "run-abc" });
+  assert.equal(ack.acknowledged, false);
+  assert.equal(ack.taskId, null);
+});
+
 await check("rejects unsupported schema versions and overlong criteria without sending", async () => {
   for (const patch of [
     { schema_version: "2" },
