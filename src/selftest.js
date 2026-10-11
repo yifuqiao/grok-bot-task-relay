@@ -51,6 +51,118 @@ await check("normalizes the dry-run ping", () => {
   assert.equal(result.task.schema_version, "1");
 });
 
+await check("rejects unsupported schema versions and overlong criteria without sending", async () => {
+  for (const patch of [
+    { schema_version: "2" },
+    { completion_criteria: "x".repeat(501) },
+    { completion_criteria: ["x".repeat(501)] },
+  ]) {
+    let calls = 0;
+    const reply = await handleMcp(
+      { jsonrpc: "2.0", id: 1, method: "tools/call",
+        params: { name: "submitTaskToGrokBot", arguments: { ...ping, ...patch } } },
+      { webhookUrl: "http://unused", webhookKey },
+      async () => { calls++; return new Response('{}'); },
+    );
+    assert.equal(reply.result.isError, true);
+    assert.equal(calls, 0);
+  }
+});
+
+await check("malformed MCP envelopes cannot forward a task", async () => {
+  for (const patch of [
+    { jsonrpc: "1.0" }, { jsonrpc: undefined }, { id: {} }, { id: true },
+    { method: 7 }, { params: "invalid" }, { params: null },
+  ]) {
+    let calls = 0;
+    const reply = await handleMcp(
+      { jsonrpc: "2.0", id: 1, method: "tools/call",
+        params: { name: "submitTaskToGrokBot", arguments: ping }, ...patch },
+      { webhookUrl: "http://unused", webhookKey },
+      async () => { calls++; return new Response('{}'); },
+    );
+    assert.equal(reply.error.code, -32600);
+    assert.equal(calls, 0);
+  }
+});
+
+await check("rejected webhook responses never count as bot acknowledgment", async () => {
+  const result = await forwardTask(ping, { webhookUrl: "http://unused", webhookKey },
+    async () => new Response(JSON.stringify({ task_id: "rejected-id", ack: true }), { status: 500 }));
+  assert.equal(result.httpStatus, 500);
+  assert.equal(result.transportAccepted, false);
+  assert.equal(result.botAcknowledged, false);
+  assert.equal(result.taskId, null);
+});
+
+await check("a broken response body preserves the observed status and reports ambiguity", async () => {
+  let calls = 0;
+  const reply = await handleMcp(
+    { jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "submitTaskToGrokBot", arguments: ping } },
+    { webhookUrl: "http://unused", webhookKey },
+    async () => {
+      calls++;
+      return new Response(new ReadableStream({
+        start(controller) { controller.error(new Error(`socket closed ${webhookKey}`)); },
+      }), { status: 200 });
+    },
+  );
+  assert.equal(calls, 1);
+  assert.equal(reply.result.isError, true);
+  const result = reply.result.structuredContent;
+  assert.equal(result.httpStatus, 200);
+  assert.equal(result.submitted, true);
+  assert.equal(result.transportAccepted, true);
+  assert.equal(result.botAcknowledged, false);
+  assert.equal(JSON.stringify(result).includes(webhookKey), false);
+  assert.match(result.error, /response body/i);
+});
+
+await check("oversized webhook bodies are cancelled without retrying", async () => {
+  let cancelled = false;
+  let calls = 0;
+  const result = await forwardTask(ping, { webhookUrl: "http://unused", webhookKey }, async () => {
+    calls++;
+    return new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new Uint8Array(64 * 1024 + 1)); },
+      cancel() { cancelled = true; },
+    }), { status: 200 });
+  });
+  assert.equal(calls, 1);
+  assert.equal(cancelled, true);
+  assert.equal(result.httpStatus, 200);
+  assert.equal(result.botAcknowledged, false);
+  assert.match(result.error, /response body/i);
+});
+
+await check("timeout during a real response body keeps HTTP 200 without another POST", async () => {
+  let calls = 0;
+  const server = http.createServer((req, res) => {
+    calls++;
+    req.resume();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.flushHeaders();
+    res.write('{"ack":');
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const result = await forwardTask(ping, {
+      webhookUrl: `http://127.0.0.1:${server.address().port}/hook`,
+      webhookKey,
+      timeoutMs: 100,
+    });
+    assert.equal(calls, 1);
+    assert.equal(result.httpStatus, 200);
+    assert.equal(result.transportAccepted, true);
+    assert.equal(result.botAcknowledged, false);
+    assert.match(result.error, /response body/i);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 await check("does not treat a generic acceptance body as a bot ack", () => {
   const ack = detectAck({ ok: true, message: "accepted" });
   assert.equal(ack.acknowledged, false);
