@@ -6,6 +6,7 @@ import http from "node:http";
 import { TaskService, taskService } from "./lifecycle.js";
 import { handleMcp } from "./mcp.js";
 import { createRequestListener } from "./http.js";
+import { loadConfig } from "./env.js";
 
 const dirs = [];
 const servers = [];
@@ -28,6 +29,19 @@ async function listen(listener) {
 }
 
 try {
+  const savedClientKeys = process.env.RELAY_CLIENT_KEYS;
+  try {
+    process.env.RELAY_CLIENT_KEYS = JSON.stringify({ default: "fake-reserved-key" });
+    assert.throws(() => loadConfig(), /RELAY_CLIENT_KEYS has invalid configuration/);
+  } finally {
+    if (savedClientKeys === undefined) delete process.env.RELAY_CLIENT_KEYS;
+    else process.env.RELAY_CLIENT_KEYS = savedClientKeys;
+  }
+  const noExecutor = { ...config(), botReportKey: "" };
+  assert.throws(() => new TaskService(noExecutor), /requires BOT_REPORT_KEY/);
+  assert.equal(fs.readdirSync(noExecutor.dataDir).length, 0);
+  assert.throws(() => taskService(noExecutor), /requires BOT_REPORT_KEY/);
+  console.log("ok reserved caller identity and missing executor key rejected before store initialization");
   const settings = config();
   let service = new TaskService(settings);
   let posts = 0;
@@ -86,6 +100,34 @@ try {
   release(await ok());
   await delayed;
   assert.equal(concurrentPosts, 1);
+  let httpRelease;
+  let httpPosts = 0;
+  let started;
+  const entered = new Promise((resolve) => { started = resolve; });
+  const httpPendingConfig = config();
+  const pendingEndpoint = await listen(createRequestListener(httpPendingConfig, () => {
+    httpPosts++;
+    started();
+    return new Promise((resolve) => { httpRelease = resolve; });
+  }));
+  const retryOptions = { method: "POST", headers: {
+    authorization: `Bearer ${httpPendingConfig.clientKeys.alice}`, "content-type": "application/json",
+  }, body: JSON.stringify({ ...task, client_request_id: "http-in-flight" }) };
+  const firstHttp = fetch(`${pendingEndpoint}/submit-task`, retryOptions);
+  await entered;
+  try {
+    const duplicateHttp = await fetch(`${pendingEndpoint}/submit-task`, retryOptions);
+    assert.equal(duplicateHttp.status, 202);
+    const accepted = await duplicateHttp.json();
+    assert.equal(accepted.status, "submitting");
+    assert.equal(accepted.deduplicated, true);
+    assert.equal(accepted.transport, null);
+    assert.equal(accepted.submitted, undefined);
+    assert.equal(httpPosts, 1);
+  } finally {
+    httpRelease(await ok());
+  }
+  assert.equal((await firstHttp).status, 200);
   console.log("ok ambiguous submissions do not retry");
 
   let callbackCalls = 0;
