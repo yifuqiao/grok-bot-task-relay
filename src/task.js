@@ -28,8 +28,7 @@ export function validateAndNormalize(input) {
   }
 
   const task = {
-    schema_version:
-      input.schema_version === undefined ? "1" : String(input.schema_version).slice(0, 40),
+    schema_version: input.schema_version === undefined ? "1" : input.schema_version,
     title,
     objective,
     completion_criteria: completion,
@@ -38,8 +37,8 @@ export function validateAndNormalize(input) {
     dry_run: dryRun,
   };
 
-  if (input.schema_version !== undefined && typeof input.schema_version !== "string") {
-    errors.push("schema_version must be a string.");
+  if (input.schema_version !== undefined && input.schema_version !== "1") {
+    errors.push('schema_version must be "1".');
   }
 
   copyOptionalText(input, task, "task_id", 120, errors);
@@ -104,7 +103,7 @@ function copyOptionalJson(input, task, name, errors) {
 }
 
 function normalizeCriteria(value, errors) {
-  if (typeof value === "string" && value.trim()) return [value.trim().slice(0, 500)];
+  if (typeof value === "string" && value.trim()) value = [value];
   if (!Array.isArray(value) || value.length === 0 || value.length > 20) {
     errors.push("completion_criteria must be a non-empty list of checkable strings.");
     return [];
@@ -113,7 +112,11 @@ function normalizeCriteria(value, errors) {
     errors.push("completion_criteria must contain only non-empty strings.");
     return [];
   }
-  return value.map((item) => item.trim().slice(0, 500));
+  if (value.some((item) => item.trim().length > 500)) {
+    errors.push("Each completion criterion must be at most 500 characters. Put longer details in brief_url.");
+    return [];
+  }
+  return value.map((item) => item.trim());
 }
 
 function isPlainObject(value) {

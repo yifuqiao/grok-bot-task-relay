@@ -1,4 +1,5 @@
 const SECRET_KEY = /authorization|api[-_]?key|token|secret|password|credential/i;
+const MAX_RESPONSE_BYTES = 64 * 1024;
 
 export async function forwardTask(task, config, fetchImpl = fetch) {
   if (!config.webhookUrl || !config.webhookKey) {
@@ -53,10 +54,20 @@ export async function forwardTask(task, config, fetchImpl = fetch) {
     });
   }
 
-  const text = await response.text();
-  const body = sanitizeBody(text, secrets);
-  const ack = detectAck(body);
   const accepted = response.status >= 200 && response.status < 300;
+  let text;
+  try {
+    text = await readResponseBody(response);
+  } catch (error) {
+    return baseResult(task, {
+      submitted: true,
+      transportAccepted: accepted,
+      httpStatus: response.status,
+      error: `Webhook returned HTTP ${response.status}, but its response body could not be read: ${redact(errorMessage(error), secrets)}. Acknowledgment is unknown; do not retry automatically.`,
+    });
+  }
+  const body = sanitizeBody(text, secrets);
+  const ack = accepted ? detectAck(body) : detectAck(null);
   return baseResult(task, {
     submitted: true,
     transportAccepted: accepted,
@@ -67,6 +78,28 @@ export async function forwardTask(task, config, fetchImpl = fetch) {
     response: body,
     error: accepted ? null : `Webhook rejected the task with HTTP ${response.status}.`,
   });
+}
+
+async function readResponseBody(response) {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new Error("Response exceeds 64 KiB limit");
+      }
+      chunks.push(value);
+    }
+    return Buffer.concat(chunks, size).toString("utf8");
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function baseResult(task, overrides) {
