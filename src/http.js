@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { loadConfig, loadEnvFile } from "./env.js";
-import { handleMcp, submitTask } from "./mcp.js";
+import { handleMcp, SERVER_VERSION, submitTask } from "./mcp.js";
 import { createOAuth, publicBaseFrom } from "./oauth.js";
 import { isDirectRun, projectRoot } from "./stdio.js";
 import { progressStatus } from "./grok-status.js";
@@ -86,6 +86,7 @@ export function createRequestListener(config, fetchImpl = fetch) {
       if (req.method === "GET" && url.pathname === "/health") {
         return sendJson(res, 200, {
           status: "up",
+          version: SERVER_VERSION,
           deliveryMode: config.deliveryMode || "webhook",
           webhookConfigured: Boolean(config.webhookUrl && config.webhookKey),
         });
