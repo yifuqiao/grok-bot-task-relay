@@ -16,6 +16,9 @@ export function taskService(config) {
 
 export class TaskService {
   constructor(config) {
+    if (typeof config.botReportKey !== "string" || !config.botReportKey.trim()) {
+      throw new Error("Lifecycle mode requires BOT_REPORT_KEY for completion reports.");
+    }
     this.config = config;
     this.records = new Map();
     this.dedupe = new Map();
