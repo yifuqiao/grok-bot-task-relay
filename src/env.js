@@ -55,7 +55,7 @@ function jsonSetting(name) {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
     if (name === "RELAY_CLIENT_KEYS") {
       for (const [owner, key] of Object.entries(value)) {
-        if (!owner || typeof key !== "string" || !key.trim() || key.trim() !== key || /\s/.test(key)) throw new Error();
+        if (!owner || owner === "default" || typeof key !== "string" || !key.trim() || key.trim() !== key || /\s/.test(key)) throw new Error();
       }
       const keys = Object.values(value);
       if (new Set(keys).size !== keys.length || keys.includes((process.env.RELAY_API_KEY || "").trim())) throw new Error();
