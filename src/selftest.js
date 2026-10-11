@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import { detectAck, forwardTask } from "./forward.js";
 import { createRequestListener } from "./http.js";
 import { handleMcp } from "./mcp.js";
@@ -343,6 +346,104 @@ await check("HTTP submit requires the relay key and posts once", async () => {
     headers: { host: "evil.example", origin: "https://evil.example" },
   });
   assert.equal(rebound.status, 403);
+  server.close();
+});
+
+await check("OAuth discovery and consent issue a bearer token", async () => {
+  const storePath = path.join(os.tmpdir(), `grok-oauth-${randomBytes(4).toString("hex")}.json`);
+  const server = http.createServer(
+    createRequestListener({
+      webhookUrl: "",
+      webhookKey: "",
+      relayApiKey: relayKey,
+      authHeader: "authorization",
+      authScheme: "Bearer",
+      timeoutMs: 3000,
+      host: "127.0.0.1",
+      port: 8787,
+      allowedOrigins: [],
+      publicBaseUrl: "",
+      oauthStorePath: storePath,
+      deliveryMode: "webhook",
+    }),
+  );
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const base = `http://127.0.0.1:${port}`;
+  const metadata = await fetch(`${base}/.well-known/oauth-authorization-server`);
+  const discovered = await metadata.json();
+  assert.equal(metadata.status, 200);
+  assert.equal(discovered.authorization_endpoint, `${base}/authorize`);
+  assert.equal(discovered.token_endpoint, `${base}/token`);
+  assert.ok(discovered.code_challenge_methods_supported.includes("S256"));
+
+  const unauthenticated = await fetch(`${base}/mcp`);
+  assert.equal(unauthenticated.status, 401);
+  assert.match(unauthenticated.headers.get("www-authenticate") || "", /resource_metadata=/);
+  await unauthenticated.arrayBuffer();
+
+  const verifier = "relay-oauth-verifier-0123456789";
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  const redirectUri = "http://127.0.0.1/callback";
+  const start = new URL(`${base}/authorize`);
+  start.searchParams.set("response_type", "code");
+  start.searchParams.set("client_id", "chatgpt");
+  start.searchParams.set("redirect_uri", redirectUri);
+  start.searchParams.set("code_challenge", challenge);
+  start.searchParams.set("code_challenge_method", "S256");
+  start.searchParams.set("state", "chat-state");
+  const page = await fetch(start);
+  const html = await page.text();
+  const txn = html.match(/name="txn" value="([^"]+)"/)?.[1];
+  assert.ok(txn);
+
+  const denied = await fetch(`${base}/authorize`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ txn, relay_key: "wrong-key" }),
+  });
+  assert.equal(denied.status, 401);
+  await denied.arrayBuffer();
+
+  const allowed = await fetch(`${base}/authorize`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ txn, relay_key: relayKey }),
+    redirect: "manual",
+  });
+  assert.equal(allowed.status, 302);
+  const location = new URL(allowed.headers.get("location"));
+  assert.equal(location.searchParams.get("state"), "chat-state");
+  const code = location.searchParams.get("code");
+  assert.ok(code);
+
+  const tokenResponse = await fetch(`${base}/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      client_id: "chatgpt",
+      redirect_uri: redirectUri,
+      code_verifier: verifier,
+    }),
+  });
+  const token = await tokenResponse.json();
+  assert.equal(tokenResponse.status, 200);
+  assert.equal(token.token_type, "Bearer");
+  assert.equal(JSON.stringify(token).includes(relayKey), false);
+
+  const listed = await fetch(`${base}/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${token.access_token}`,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+  });
+  const listedBody = await listed.json();
+  assert.equal(listed.status, 200);
+  assert.equal(listedBody.result.tools[0].name, "submitTaskToGrokBot");
   server.close();
 });
 
