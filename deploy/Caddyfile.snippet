@@ -1,4 +1,6 @@
 # Replace the hostname with a name that already points at the relay.
+# Proxy the whole site. ChatGPT OAuth discovery uses /.well-known, /authorize, /token, and /register,
+# not only /mcp. Do not replace existing dashboard sites.
 # Keep this site on loopback if the relay's public HTTPS is terminated in front of Caddy.
 grok-relay.example.com {
     bind 127.0.0.1

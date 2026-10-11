@@ -4,19 +4,28 @@ import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { loadConfig, loadEnvFile } from "./env.js";
 import { handleMcp, submitTask } from "./mcp.js";
+import { createOAuth, publicBaseFrom } from "./oauth.js";
 import { isDirectRun, projectRoot } from "./stdio.js";
 import { taskService } from "./lifecycle.js";
 
 const MAX_BODY = 64 * 1024;
 
 export function createRequestListener(config, fetchImpl = fetch) {
+  const storePath = Object.prototype.hasOwnProperty.call(config, "oauthStorePath")
+    ? config.oauthStorePath
+    : path.join(config.dataDir || path.join(projectRoot(), "data"), "oauth-grants.json");
+  const oauth = createOAuth({ ...config, oauthStorePath: storePath });
   return async function listener(req, res) {
     try {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      const base = publicBaseFrom(req, config);
+      if (isOAuthRoute(url.pathname)) {
+        return handleOAuth(req, res, url, base, oauth);
+      }
       if (!hostAllowed(req, config) || !originAllowed(req, config)) {
         return sendJson(res, 403, { error: "Origin or host is not allowed." });
       }
 
-      const url = new URL(req.url || "/", "http://127.0.0.1");
       if (url.pathname === "/executor/tasks") {
         if (!bearerMatches(req, config.botReportKey)) return sendJson(res, 401, { error: "Unauthorized." });
         if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed." });
@@ -47,7 +56,7 @@ export function createRequestListener(config, fetchImpl = fetch) {
       }
       const taskRoute = url.pathname.match(/^\/tasks\/([a-f0-9-]{36})(?:\/(result|notify))?$/);
       if (taskRoute) {
-        const owner = caller(req, config);
+        const owner = caller(req, config, oauth);
         if (owner === null) return sendJson(res, 401, { error: "Unauthorized." });
         const service = taskService(config);
         if (!service) return sendJson(res, 503, { error: "Task lifecycle is not configured." });
@@ -68,13 +77,20 @@ export function createRequestListener(config, fetchImpl = fetch) {
         });
       }
 
+      if ((url.pathname === "/mcp" || url.pathname === "/") && caller(req, config, oauth) === null) {
+        return sendJson(res, 401, { error: "Unauthorized." }, {
+          "www-authenticate": oauth.authenticateHeader(base),
+          ...corsHeaders(),
+        });
+      }
+
       if (req.method === "GET" && url.pathname === "/release.tgz") {
-        if (!authorized(req, config)) return sendJson(res, 401, { error: "Unauthorized." });
+        if (!authorized(req, config, oauth)) return sendJson(res, 401, { error: "Unauthorized." });
         return sendRelease(res);
       }
 
       if (req.method === "GET" && url.pathname === "/deploy.md") {
-        if (!authorized(req, config)) return sendJson(res, 401, { error: "Unauthorized." });
+        if (!authorized(req, config, oauth)) return sendJson(res, 401, { error: "Unauthorized." });
         return sendTextFile(res, path.join(projectRoot(), "deploy", "TASK.md"), "text/markdown; charset=utf-8");
       }
 
@@ -84,7 +100,7 @@ export function createRequestListener(config, fetchImpl = fetch) {
       if (req.method !== "POST") {
         return sendJson(res, 405, { error: "Method not allowed." });
       }
-      if (!authorized(req, config)) {
+      if (!authorized(req, config, oauth)) {
         return sendJson(res, 401, { error: "Unauthorized." });
       }
 
@@ -92,12 +108,12 @@ export function createRequestListener(config, fetchImpl = fetch) {
       const body = raw ? JSON.parse(raw) : {};
 
       if (url.pathname === "/submit-task") {
-        const outcome = await submitTask(body, config, fetchImpl, caller(req, config));
+        const outcome = await submitTask(body, config, fetchImpl, caller(req, config, oauth));
         return sendJson(res, relayStatus(outcome.result), outcome.result);
       }
 
       if (url.pathname === "/mcp" || url.pathname === "/") {
-        const response = await handleMcp(body, config, fetchImpl, caller(req, config));
+        const response = await handleMcp(body, config, fetchImpl, caller(req, config, oauth));
         if (!response) {
           res.writeHead(202);
           res.end();
@@ -125,16 +141,97 @@ export function startServer(config, fetchImpl = fetch) {
   });
 }
 
-function authorized(req, config) {
-  return caller(req, config) !== null;
+function authorized(req, config, oauth) {
+  return caller(req, config, oauth) !== null;
 }
 
-function caller(req, config) {
+function caller(req, config, oauth) {
   if (bearerMatches(req, config.relayApiKey)) return "default";
   for (const [owner, key] of Object.entries(config.clientKeys || {})) {
     if (bearerMatches(req, key)) return owner;
   }
+  const header = String(req.headers.authorization || "");
+  const match = header.match(/^Bearer\s+(\S+)\s*$/i);
+  if (match && oauth && oauth.hasAccessToken(match[1])) return "default";
   return null;
+}
+
+async function handleOAuth(req, res, url, base, oauth) {
+  if (req.method === "GET" && isProtectedResourcePath(url.pathname)) {
+    return sendJson(res, 200, oauth.metadata(base).protectedResource, corsHeaders());
+  }
+  if (req.method === "GET" && isAuthorizationServerPath(url.pathname)) {
+    return sendJson(res, 200, oauth.metadata(base).authorizationServer, corsHeaders());
+  }
+  if (url.pathname === "/register" && req.method === "POST") {
+    const body = parseBody(await readBody(req), req.headers["content-type"]);
+    const result = oauth.register(body);
+    return sendJson(res, result.status, result.body);
+  }
+  if (url.pathname === "/authorize" && req.method === "GET") {
+    const result = oauth.authorizePage(Object.fromEntries(url.searchParams), base);
+    return sendHtml(res, result.status, result.html);
+  }
+  if (url.pathname === "/authorize" && req.method === "POST") {
+    const form = parseBody(await readBody(req), req.headers["content-type"]);
+    const result = oauth.authorizeSubmit(form);
+    if (result.location) {
+      res.writeHead(result.status, { location: result.location });
+      res.end();
+      return;
+    }
+    return sendHtml(res, result.status, result.html);
+  }
+  if (url.pathname === "/token" && req.method === "POST") {
+    const form = parseBody(await readBody(req), req.headers["content-type"]);
+    const result = oauth.token(form);
+    return sendJson(res, result.status, result.body);
+  }
+  return sendJson(res, 405, { error: "Method not allowed." });
+}
+
+function isOAuthRoute(pathname) {
+  return (
+    isProtectedResourcePath(pathname) ||
+    isAuthorizationServerPath(pathname) ||
+    pathname === "/authorize" ||
+    pathname === "/token" ||
+    pathname === "/register"
+  );
+}
+
+function isProtectedResourcePath(pathname) {
+  return (
+    pathname === "/.well-known/oauth-protected-resource" ||
+    pathname === "/.well-known/oauth-protected-resource/mcp"
+  );
+}
+
+function isAuthorizationServerPath(pathname) {
+  return (
+    pathname === "/.well-known/oauth-authorization-server" ||
+    pathname === "/.well-known/oauth-authorization-server/mcp"
+  );
+}
+
+function corsHeaders() {
+  return { "access-control-allow-origin": "*" };
+}
+
+function parseBody(raw, contentType) {
+  if (!raw) return {};
+  if (String(contentType || "").includes("application/json")) return JSON.parse(raw);
+  return Object.fromEntries(new URLSearchParams(raw));
+}
+
+function sendHtml(res, status, html) {
+  const payload = Buffer.from(html);
+  res.writeHead(status, {
+    "content-type": "text/html; charset=utf-8",
+    "content-length": payload.length,
+    "cache-control": "no-store",
+  });
+  res.end(payload);
 }
 
 function bearerMatches(req, key) {
@@ -227,11 +324,12 @@ function relayStatus(result) {
   return 400;
 }
 
-function sendJson(res, status, body) {
+function sendJson(res, status, body, extraHeaders = {}) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(payload),
+    ...extraHeaders,
   });
   res.end(payload);
 }

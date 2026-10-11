@@ -93,12 +93,14 @@ cloudflared tunnel --url http://127.0.0.1:8787
 | --- | --- | --- |
 | Cursor | 已写入本机 `mcp.json`，用本地进程，不经过隧道 | 进程自己读 `.env` |
 | Claude | Settings → Connectors → Add custom connector | Request header 选 `authorization`，值写 `Bearer <RELAY_API_KEY>`，`Bearer` 和密钥之间有一个空格 |
-| ChatGPT | Plugins → Add custom MCP server | 地址填 `https://….trycloudflare.com/mcp`，认证用同一把 Bearer 钥匙 |
+| ChatGPT | Plugins → Add custom MCP server | 地址填公网 `https://<域名>/mcp`，认证选 OAuth。同意页里输入 `RELAY_API_KEY`，不要贴进聊天 |
 | Grok | grok.com/connectors → New Connector → Custom | 地址同上。有 authorization 字段时填这把 Bearer 钥匙 |
 | Muse 聊天 App | 没有自定义 MCP 入口 | 用 Muse Code |
 | Muse Code | `~/.config/muse/settings.json` 的 `mcp_servers` | `url` 填 MCP 地址，并带上同一个 authorization header |
 
 Claude 的网页版如果看不到 Request headers，说明当前账号还不能保存固定钥匙，需要改用 OAuth。那时候不要把服务改成免认证。
+
+ChatGPT 的自定义 MCP 会先找 OAuth。环境里要有 `RELAY_PUBLIC_BASE_URL`（例如 `https://relay.onetopway.com`，不要带路径或结尾斜杠）。Caddy 必须反代整个站点，不能只转发 `/mcp`，否则 `/.well-known` 会 404。同意页核对的是现有的 `RELAY_API_KEY`。Bearer 钥匙仍然可以直接调用，OAuth 通过后发给聊天应用的是另一把访问令牌。
 
 ## 贴给聊天平台的规则
 
