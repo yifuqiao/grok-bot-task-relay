@@ -5,17 +5,50 @@ import path from "node:path";
 import { loadConfig, loadEnvFile } from "./env.js";
 import { handleMcp, submitTask } from "./mcp.js";
 import { isDirectRun, projectRoot } from "./stdio.js";
+import { taskService } from "./lifecycle.js";
 
 const MAX_BODY = 64 * 1024;
 
 export function createRequestListener(config, fetchImpl = fetch) {
   return async function listener(req, res) {
     try {
-      if (!hostAllowed(req, config) || !originAllowed(req, config, authorized(req, config))) {
+      if (!hostAllowed(req, config) || !originAllowed(req, config)) {
         return sendJson(res, 403, { error: "Origin or host is not allowed." });
       }
 
       const url = new URL(req.url || "/", "http://127.0.0.1");
+      const executor = url.pathname.match(/^\/executor\/tasks\/([a-f0-9-]{36})\/(manifest|report)$/);
+      if (executor) {
+        if (!bearerMatches(req, config.botReportKey)) return sendJson(res, 401, { error: "Unauthorized." });
+        const service = taskService(config);
+        if (!service) return sendJson(res, 503, { error: "Task lifecycle is not configured." });
+        const record = service.records.get(executor[1]);
+        if (!record) return sendJson(res, 404, { error: "Task not found." });
+        if (req.method === "GET" && executor[2] === "manifest") {
+          return sendJson(res, 200, { relay_task_id: record.relayTaskId, ...record.task });
+        }
+        if (req.method === "POST" && executor[2] === "report") {
+          const report = JSON.parse(await readBody(req));
+          const outcome = await service.report(executor[1], report);
+          return sendJson(res, outcome.status, outcome.body);
+        }
+        return sendJson(res, 405, { error: "Method not allowed." });
+      }
+      const taskRoute = url.pathname.match(/^\/tasks\/([a-f0-9-]{36})(?:\/(result|notify))?$/);
+      if (taskRoute) {
+        const owner = caller(req, config);
+        if (owner === null) return sendJson(res, 401, { error: "Unauthorized." });
+        const service = taskService(config);
+        if (!service) return sendJson(res, 503, { error: "Task lifecycle is not configured." });
+        const record = service.get(taskRoute[1], owner);
+        if (!record) return sendJson(res, 404, { error: "Task not found." });
+        if (req.method === "POST" && taskRoute[2] === "notify") {
+          const outcome = await service.notify(record.relayTaskId, owner);
+          return sendJson(res, outcome.status, outcome.body);
+        }
+        if (req.method === "GET" && taskRoute[2] !== "notify") return sendJson(res, 200, service.view(record));
+        return sendJson(res, 405, { error: "Method not allowed." });
+      }
       if (req.method === "GET" && url.pathname === "/health") {
         return sendJson(res, 200, {
           status: "up",
@@ -47,12 +80,12 @@ export function createRequestListener(config, fetchImpl = fetch) {
       const body = raw ? JSON.parse(raw) : {};
 
       if (url.pathname === "/submit-task") {
-        const outcome = await submitTask(body, config, fetchImpl);
+        const outcome = await submitTask(body, config, fetchImpl, caller(req, config));
         return sendJson(res, relayStatus(outcome.result), outcome.result);
       }
 
       if (url.pathname === "/mcp" || url.pathname === "/") {
-        const response = await handleMcp(body, config, fetchImpl);
+        const response = await handleMcp(body, config, fetchImpl, caller(req, config));
         if (!response) {
           res.writeHead(202);
           res.end();
@@ -70,9 +103,10 @@ export function createRequestListener(config, fetchImpl = fetch) {
 }
 
 export function startServer(config, fetchImpl = fetch) {
-  if (!config.relayApiKey) {
+  if (!config.relayApiKey && !Object.keys(config.clientKeys || {}).length) {
     throw new Error("RELAY_API_KEY is missing. Add it to .env before starting the HTTP relay.");
   }
+  taskService(config);
   const server = http.createServer(createRequestListener(config, fetchImpl));
   return new Promise((resolve) => {
     server.listen(config.port, config.host, () => resolve(server));
@@ -80,10 +114,22 @@ export function startServer(config, fetchImpl = fetch) {
 }
 
 function authorized(req, config) {
+  return caller(req, config) !== null;
+}
+
+function caller(req, config) {
+  if (bearerMatches(req, config.relayApiKey)) return "default";
+  for (const [owner, key] of Object.entries(config.clientKeys || {})) {
+    if (bearerMatches(req, key)) return owner;
+  }
+  return null;
+}
+
+function bearerMatches(req, key) {
   const header = String(req.headers.authorization || "");
   const match = header.match(/^Bearer\s+(\S+)\s*$/i);
-  if (!match || !config.relayApiKey) return false;
-  return safeEqual(match[1], config.relayApiKey);
+  if (!match || !key) return false;
+  return safeEqual(match[1], key);
 }
 
 function safeEqual(left, right) {
@@ -108,13 +154,13 @@ function hostAllowed(req, config) {
   return peer === "127.0.0.1" || peer === "::1" || peer === "::ffff:127.0.0.1";
 }
 
-function originAllowed(req, config, isAuthorized) {
+function originAllowed(req, config) {
   const origin = req.headers.origin;
-  if (!origin || isAuthorized) return true;
+  if (!origin) return true;
   const allowed = new Set([
     `http://127.0.0.1:${config.port}`,
     `http://localhost:${config.port}`,
-    ...config.allowedOrigins,
+    ...(config.allowedOrigins || []),
   ]);
   return allowed.has(origin);
 }
@@ -160,6 +206,7 @@ function sendRelease(res) {
 }
 
 function relayStatus(result) {
+  if (result.deduplicated && result.status === "submitting") return 202;
   if (result.submitted) return 200;
   if (result.error && result.error.startsWith("Webhook URL")) return 503;
   if (result.error && result.error.includes("failed before")) return 502;

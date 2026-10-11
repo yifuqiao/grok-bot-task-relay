@@ -2,9 +2,21 @@
 
 聊天留在 ChatGPT、Claude、Grok、Muse。方案聊清楚之后，你明确说一句「交给 Grok Bot 执行」，那个平台再调用这里的 `submitTaskToGrokBot`。中转服务把任务 POST 到你已经建好的 Grok Bot webhook。Webhook 密钥只放在本机 `.env`，不要贴进任何聊天。
 
-长说明写成 Markdown，用 `brief_url` 指向它。webhook 的 JSON 保持在 3000 字节以内，只放标题、目标、完成标准和这个地址。源码放压缩包，不放进 JSON，也不放进 Markdown。
+长说明可以使用 `brief_url`，或启用下文的持久任务模式后直接提交 `markdown`。文件和图片使用 HTTPS 附件引用；本 PR 不提供文件上传或代取外部附件。发给 Grok Bot 的 webhook JSON 仍保持在 3000 字节以内，较大的任务通过受认证保护的完整任务清单传递。
 
 Grok Bot 收到的是一次执行请求。闲聊和头脑风暴不要走这条链路。
+
+## 多平台任务、附件和完成回报
+
+新增的持久任务模式同时服务 MCP 和 HTTP API，支持文件/图片引用、Markdown 正文、任务查询、同一调用方的提交去重以及完成通知。默认不启用，原来的单次转发配置继续工作。
+
+完整配置、接口示例、Grok Bot 完成回报契约和企业微信接入边界见 [任务生命周期与回调](docs/task-lifecycle.md)。平台兼容以实际连接测试为准，不表示已接通 ChatGPT、Claude、Grok、DeepSeek 或企业微信。
+
+启用后，在现有配置基础上设置 `RELAY_DATA_DIR`、稳定公网 HTTPS 的 `RELAY_PUBLIC_BASE_URL`，以及与调用方钥匙不同的 `BOT_REPORT_KEY`。Grok Bot 必须能够用该执行端钥匙读取任务清单和提交完成报告。
+
+MCP 提供 `submitTaskToGrokBot`、`getTaskStatus`、`getTaskResult`；API 提供提交、查询、执行端回报和通知重发接口。需要通知时，管理员在私有环境文件中登记回调目标，任务只填写目标名称。未登记回调时，可使用查询工具读取结果。
+
+`finished` 只由经过认证的 Grok Bot 完成报告触发。webhook 返回 200、分配了中转任务编号、收到 Bot 的接收确认，都不等于执行完成。通知失败不改变任务执行结果，也不会自动再次执行任务。
 
 ## 配置
 

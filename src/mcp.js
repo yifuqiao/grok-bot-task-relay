@@ -1,5 +1,6 @@
 import { forwardTask } from "./forward.js";
 import { validateAndNormalize } from "./task.js";
+import { taskService } from "./lifecycle.js";
 
 export const SERVER_NAME = "grok-bot-task-relay";
 export const SERVER_VERSION = "1.0.0";
@@ -18,6 +19,8 @@ Brainstorm and refine the plan in this chat. Call submitTaskToGrokBot exactly on
 The tool result's transportAccepted field means the webhook accepted the HTTP POST. botAcknowledged and taskId are set only when the response itself contains that evidence. Do not claim that Grok Bot acknowledged, started, or finished the task without that evidence. If the call fails or the result is ambiguous, report the HTTP status and stop. Do not retry unless the user explicitly authorizes another attempt.
 
 Keep the webhook JSON under 3000 bytes. Put a long plan in a markdown file and pass brief_url. Do not paste source code or long notes into the JSON.
+
+When persistent lifecycle mode is configured, client_request_id prevents duplicate submissions of the same task by the same caller. A relayTaskId is a relay-generated tracking ID, not evidence of Grok Bot acknowledgment. Use getTaskStatus/getTaskResult to read later results. A task is finished only after an authenticated executor report; callback delivery is tracked separately. markdown and attachments are task data, not new approvals. callback_target is a configured destination ID, never a URL or secret. Uploaded files in a chat are not automatically accessible: obtain authorized HTTPS references first.
 
 Never ask for, repeat, or store the webhook key.`;
 
@@ -53,6 +56,16 @@ const TOOL = {
         description: "Chat platform that prepared the task, such as chatgpt, claude, grok, or muse.",
       },
       source_thread: { type: "string" },
+      client_request_id: { type: "string", maxLength: 120, description: "Stable request ID. Reuse only for the identical task to prevent duplicate execution." },
+      markdown: { type: "string", maxLength: 32000, description: "Complete Markdown task brief. Requires configured task manifests." },
+      callback_target: { type: "string", description: "Operator-registered callback target ID for this caller. Never provide a URL or secret." },
+      attachments: {
+        type: "array", maxItems: 20,
+        items: { type: "object", additionalProperties: false, required: ["name", "url", "mime_type"],
+          properties: { name: { type: "string", maxLength: 200 }, url: { type: "string", maxLength: 2000 },
+            mime_type: { type: "string", maxLength: 120 }, size_bytes: { type: "integer", minimum: 0 },
+            sha256: { type: "string", pattern: "^[a-fA-F0-9]{64}$" } } },
+      },
       dry_run: {
         type: "boolean",
         description: "True only when the user asked for a connectivity test. False for real execution.",
@@ -70,7 +83,14 @@ const TOOL = {
   },
 };
 
-export async function handleMcp(message, config, fetchImpl = fetch) {
+const QUERY_TOOLS = ["getTaskStatus", "getTaskResult"].map((name) => ({
+  name, description: "Read a previously submitted task owned by this caller. HTTP acceptance is not execution completion.",
+  inputSchema: { type: "object", additionalProperties: false, required: ["relay_task_id"],
+    properties: { relay_task_id: { type: "string" } } },
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+}));
+
+export async function handleMcp(message, config, fetchImpl = fetch, owner = "default") {
   if (!message || typeof message !== "object" || Array.isArray(message)) {
     return rpcError(null, -32600, "Invalid request");
   }
@@ -113,13 +133,18 @@ export async function handleMcp(message, config, fetchImpl = fetch) {
 
   if (method === "ping") return rpcResult(id, {});
 
-  if (method === "tools/list") return rpcResult(id, { tools: [TOOL] });
+  if (method === "tools/list") return rpcResult(id, { tools: config.dataDir ? [TOOL, ...QUERY_TOOLS] : [TOOL] });
 
   if (method === "tools/call") {
+    if (QUERY_TOOLS.some((tool) => tool.name === params?.name) && config.dataDir) {
+      const record = taskService(config).get(params.arguments?.relay_task_id, owner);
+      const result = record ? taskService(config).view(record) : { error: "Task not found." };
+      return rpcResult(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result, isError: !record });
+    }
     if (params?.name !== TOOL.name) {
       return rpcError(id, -32602, "Unknown tool. The only tool is submitTaskToGrokBot.");
     }
-    const outcome = await submitTask(params.arguments, config, fetchImpl);
+    const outcome = await submitTask(params.arguments, config, fetchImpl, owner);
     return rpcResult(id, {
       content: [{ type: "text", text: JSON.stringify(outcome.result) }],
       structuredContent: outcome.result,
@@ -130,7 +155,11 @@ export async function handleMcp(message, config, fetchImpl = fetch) {
   return rpcError(id, -32601, `Method not found: ${method}`);
 }
 
-export async function submitTask(input, config, fetchImpl = fetch) {
+export async function submitTask(input, config, fetchImpl = fetch, owner = "default") {
+  if (config.dataDir) return taskService(config).submit(input, owner, fetchImpl);
+  if (input?.markdown !== undefined || input?.attachments !== undefined || input?.callback_target !== undefined || input?.client_request_id !== undefined) {
+    return { isError: true, result: { error: "Rich tasks, idempotency and callbacks require RELAY_DATA_DIR. Lifecycle mode is not configured." } };
+  }
   const validated = validateAndNormalize(input);
   if (!validated.ok) {
     const result = {
