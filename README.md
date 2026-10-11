@@ -106,7 +106,7 @@ ChatGPT 的自定义 MCP 会先找 OAuth。环境里要有 `RELAY_PUBLIC_BASE_UR
 
 交给 Grok Bot 之后，调用方拿到 `receipt.relayTaskId`。HTTP 200 和 `transportAccepted` 只表示 webhook 收下了这次 POST，不是执行回执。`runUuid` 只是 webhook 运输编号，也不能当成 Bot 已确认。真正的进度来自执行 Bot 用 `BOT_REPORT_KEY` 向 `/executor/tasks/<relay_task_id>/progress` 回报。
 
-ChatGPT 问进度时调用 `getTaskStatus` 一次。Cursor 或其他调用方也可以用同一把 caller 钥匙 `GET /tasks/<relay_task_id>` 读回执。`submitted` 表示任务已发出并登记。`received`、`executing`、`waiting_approval` 是进度。只有 `finished` 或 `failed` 表示这单结束。摘要在 `summary` 里。从 Cursor 交任务时必须走 relay 的 `/submit-task` 或 MCP，不要直打 Grok Bot webhook，否则这里拿不到 `relayTaskId`。
+ChatGPT 问进度时调用 `getTaskStatus` 一次。问当前连的是哪一版时，调用 `getRelayInfo` 一次，不要用应用商店页面上的 Version。Cursor 或其他调用方也可以用同一把 caller 钥匙 `GET /tasks/<relay_task_id>` 读回执。`submitted` 表示任务已发出并登记。`received`、`executing`、`waiting_approval` 是进度。只有 `finished` 或 `failed` 表示这单结束。摘要在 `summary` 里。从 Cursor 交任务时必须走 relay 的 `/submit-task` 或 MCP，不要直打 Grok Bot webhook，否则这里拿不到 `relayTaskId`。
 
 如果 `RELAY_DELIVERY_MODE=pull` 同时又配置了 webhook，中转会把任务通知给 Grok Bot，并带上 `relay_task_id`，不会一直停在「已入队、无人领取」。纯 pull、没有 webhook 时，仍然要由执行端 claim 后再回报。
 
