@@ -74,6 +74,14 @@ await check("ChatGPT can read Grok Bot progress for a webhook handoff", async ()
     assert.equal(listed.result.structuredContent.status, "executing");
     assert.equal(listed.result.structuredContent.summary, "Reading the brief.");
 
+    const httpStatus = await fetch(`${base}/tasks/${body.relayTaskId}`, {
+      headers: { authorization: "Bearer relay-key" },
+    });
+    const httpBody = await httpStatus.json();
+    assert.equal(httpStatus.status, 200);
+    assert.equal(httpBody.status, "executing");
+    assert.equal(httpBody.receipt.relayTaskId, body.relayTaskId);
+
     const other = await handleMcp(
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "getTaskStatus", arguments: { relay_task_id: body.relayTaskId } } },
       config,

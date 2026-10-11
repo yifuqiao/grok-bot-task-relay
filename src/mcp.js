@@ -7,7 +7,7 @@ import { validateAndNormalize } from "./task.js";
 import { taskService } from "./lifecycle.js";
 
 export const SERVER_NAME = "grok-bot-task-relay";
-export const SERVER_VERSION = "1.1.1";
+export const SERVER_VERSION = "1.1.2";
 export const SUPPORTED_PROTOCOLS = [
   "2026-07-28",
   "2025-11-25",
