@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { taskService, TaskService } from "./lifecycle.js";
 import { createRequestListener } from "./http.js";
 import { handleMcp } from "./mcp.js";
@@ -11,6 +13,21 @@ const directory = fs.mkdtempSync(path.join(os.tmpdir(), "relay-pull-test-"));
 const config = { deliveryMode: "pull", dataDir: directory, botReportKey: "fake-executor-key",
   relayApiKey: "fake-caller-key", clientKeys: { other: "fake-other-key" }, callbackTargets: {},
   host: "127.0.0.1", allowedOrigins: [] };
+const stdioAttempt = spawnSync(process.execPath, [fileURLToPath(new URL("./stdio.js", import.meta.url))], {
+  env: { ...process.env, RELAY_DELIVERY_MODE: "pull", RELAY_DATA_DIR: directory,
+    BOT_REPORT_KEY: "fake-executor-key", RELAY_API_KEY: "fake-caller-key",
+    RELAY_CLIENT_KEYS: "{}", RELAY_CALLBACK_TARGETS: "{}" },
+  input: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+    name: "submitTaskToGrokBot", arguments: { title: "Unreachable task", objective: "Must not queue",
+      source: "test", completion_criteria: ["Not accepted"] },
+  } }) + "\n", encoding: "utf8", timeout: 5000,
+});
+assert.equal(stdioAttempt.error, undefined);
+assert.equal(stdioAttempt.status, 1);
+assert.equal(stdioAttempt.stdout, "");
+assert.match(stdioAttempt.stderr, /Pull mode requires the HTTP service/);
+assert.deepEqual(fs.readdirSync(directory), []);
+console.log("ok stdio rejects pull mode without accepting tasks or acquiring the writer lock");
 const service = taskService(config);
 const server = http.createServer(createRequestListener(config, () => { throw new Error("Must not call webhook"); }));
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -52,6 +69,15 @@ try {
   assert.equal((await (await fetch(base + "/executor/tasks", { headers: executor })).json()).tasks.length, 0);
   assert.equal((await (await fetch(base + prefix + "/manifest", { headers: executor })).json()).markdown, task.markdown);
   assert.equal((await fetch(base + `/tasks/${id}`, { headers: { authorization: "Bearer fake-other-key" } })).status, 404);
+  const remoteMcp = await post("/mcp", { jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+    name: "submitTaskToGrokBot", arguments: { ...task, client_request_id: "http-mcp-request" },
+  } }, caller);
+  assert.equal(remoteMcp.status, 200);
+  const mcpResult = (await remoteMcp.json()).result;
+  assert.equal(mcpResult.isError, false);
+  assert.equal(mcpResult.structuredContent.status, "queued");
+  assert.equal((await post(`/executor/tasks/${mcpResult.structuredContent.relayTaskId}/claim`,
+    { claim_id: "http-mcp-worker" })).status, 200);
   service.close();
   const restarted = new TaskService(config);
   assert.equal(restarted.get(id, "default").status, "claimed");
