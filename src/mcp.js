@@ -1,3 +1,4 @@
+import { continueCursorTask, CURSOR_TOOLS, getCursorTask, listCursorRepos, startCursorTask } from "./cursor.js";
 import { forwardTask } from "./forward.js";
 import { validateAndNormalize } from "./task.js";
 import { taskService } from "./lifecycle.js";
@@ -24,7 +25,9 @@ When persistent lifecycle mode is configured, client_request_id prevents duplica
 
 In pull delivery mode no receiver bot, webhook URL, or bot ID is required in the task. accepted/queued means the relay stored the task for an authorized executor to claim; it does not mean Grok Bot received or started it. claimed means reserved, not proof of execution. A dry run stays out of the executor inbox. Rich briefs use the lifecycle size limit in this mode rather than the webhook envelope limit.
 
-Never ask for, repeat, or store the webhook key.`;
+When the user explicitly asks to hand the work to Cursor, do not call startCursorTask until they choose a repository. If that message already names one repository, use it. Otherwise call listCursorRepos once and ask, in the user's language, whether to create a new private repository or use one of the listed repositories. Wait for the choice. Omit repo_url only after they choose a new repository. Pass repo_url after they choose an existing one. Then call startCursorTask once. accepted means Cursor accepted the launch, not that the work finished. Use getCursorTask with that agent_id to read status and pull request URLs. Call continueCursorTask only when the user explicitly sends a follow-up. Do not retry a failed launch.
+
+Never ask for, repeat, or store the webhook key, Cursor API key, or GitHub token.`;
 
 const TOOL = {
   name: "submitTaskToGrokBot",
@@ -135,7 +138,10 @@ export async function handleMcp(message, config, fetchImpl = fetch, owner = "def
 
   if (method === "ping") return rpcResult(id, {});
 
-  if (method === "tools/list") return rpcResult(id, { tools: config.dataDir ? [TOOL, ...QUERY_TOOLS] : [TOOL] });
+  if (method === "tools/list") {
+    const tools = config.dataDir ? [TOOL, ...QUERY_TOOLS, ...CURSOR_TOOLS] : [TOOL, ...CURSOR_TOOLS];
+    return rpcResult(id, { tools });
+  }
 
   if (method === "tools/call") {
     if (QUERY_TOOLS.some((tool) => tool.name === params?.name) && config.dataDir) {
@@ -143,8 +149,16 @@ export async function handleMcp(message, config, fetchImpl = fetch, owner = "def
       const result = record ? taskService(config).view(record) : { error: "Task not found." };
       return rpcResult(id, { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result, isError: !record });
     }
+    if (CURSOR_TOOLS.some((tool) => tool.name === params?.name)) {
+      const outcome = await callCursor(params.name, params.arguments, config, fetchImpl, owner);
+      return rpcResult(id, {
+        content: [{ type: "text", text: JSON.stringify(outcome.result) }],
+        structuredContent: outcome.result,
+        isError: outcome.isError,
+      });
+    }
     if (params?.name !== TOOL.name) {
-      return rpcError(id, -32602, "Unknown tool. The only tool is submitTaskToGrokBot.");
+      return rpcError(id, -32602, "Unknown tool.");
     }
     const outcome = await submitTask(params.arguments, config, fetchImpl, owner);
     return rpcResult(id, {
@@ -179,6 +193,14 @@ export async function submitTask(input, config, fetchImpl = fetch, owner = "defa
   }
   const result = await forwardTask(validated.task, config, fetchImpl);
   return { isError: !result.transportAccepted || Boolean(result.error), result };
+}
+
+function callCursor(name, args, config, fetchImpl, owner) {
+  if (name === "listCursorRepos") return listCursorRepos(args, config, fetchImpl);
+  if (name === "startCursorTask") return startCursorTask(args, config, fetchImpl, owner);
+  if (name === "getCursorTask") return getCursorTask(args, config, fetchImpl, owner);
+  if (name === "continueCursorTask") return continueCursorTask(args, config, fetchImpl, owner);
+  return { isError: true, result: { error: "Unknown tool." } };
 }
 
 function rpcResult(id, result) {
