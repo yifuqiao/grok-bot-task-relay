@@ -17,6 +17,10 @@ export function isDirectRun(metaUrl) {
 if (isDirectRun(import.meta.url)) {
   loadEnvFile(path.join(projectRoot(), ".env"));
   const config = loadConfig();
+  if (config.deliveryMode === "pull") {
+    console.error("Pull mode requires the HTTP service. Run src/http.js and connect MCP callers to /mcp; stdio cannot expose executor endpoints.");
+    process.exit(1);
+  }
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
   rl.on("line", (line) => {
     const trimmed = line.trim();
