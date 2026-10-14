@@ -11,6 +11,6 @@
     "start": "node src/stdio.js",
     "start:http": "node src/http.js",
     "check": "node src/check-config.js",
-    "test": "node src/selftest.js && node src/lifecycle-test.js && node src/pull-test.js && node src/cursor-test.js && node src/grok-status-test.js"
+    "test": "node src/oauth-test.js && node src/selftest.js && node src/lifecycle-test.js && node src/pull-test.js && node src/cursor-test.js && node src/grok-status-test.js"
   }
 }

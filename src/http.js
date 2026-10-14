@@ -4,7 +4,7 @@ import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { loadConfig, loadEnvFile } from "./env.js";
 import { handleMcp, SERVER_VERSION, submitTask } from "./mcp.js";
-import { createOAuth, publicBaseFrom } from "./oauth.js";
+import { assertOAuthPublicBase, createOAuth, publicBaseFrom } from "./oauth.js";
 import { isDirectRun, projectRoot } from "./stdio.js";
 import { progressStatus, readStatus } from "./grok-status.js";
 import { taskService } from "./lifecycle.js";
@@ -163,6 +163,7 @@ export function startServer(config, fetchImpl = fetch) {
   if (!config.relayApiKey && !Object.keys(config.clientKeys || {}).length) {
     throw new Error("RELAY_API_KEY is missing. Add it to .env before starting the HTTP relay.");
   }
+  assertOAuthPublicBase(config);
   taskService(config);
   const server = http.createServer(createRequestListener(config, fetchImpl));
   return new Promise((resolve) => {

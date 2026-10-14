@@ -80,6 +80,9 @@ export function createOAuth(config) {
     authorizePage(query, base) {
       const checked = checkAuthorizeQuery(query, state);
       if (checked.error) return { status: 400, html: page("Cannot start sign-in", escapeHtml(checked.error)) };
+      if (!presentSecret(config.relayApiKey)) {
+        return { status: 401, html: page("Sign-in unavailable", "OAuth sign-in is not available on this relay.") };
+      }
       const txn = randomBytes(18).toString("base64url");
       state.txns[txn] = { ...checked, expiresAt: Date.now() + TXN_TTL_MS };
       persist();
@@ -101,17 +104,25 @@ export function createOAuth(config) {
       if (!txn || txn.expiresAt <= Date.now()) {
         return { status: 400, html: page("Sign-in expired", "Start the connection again from the chat app.") };
       }
-      if (!safeEqual(form.relay_key || "", config.relayApiKey || "")) {
-        const html = page(
-          "Key did not match",
-          `<p>The relay key was not accepted.</p>
-           <form method="post" action="/authorize">
-             <input type="hidden" name="txn" value="${escapeHtml(form.txn)}">
-             <label>Relay key <input type="password" name="relay_key" autocomplete="current-password" required></label>
-             <button type="submit">Allow</button>
-           </form>`,
-        );
-        return { status: 401, html };
+      const client = state.clients[txn.clientId];
+      if (!client || !Array.isArray(client.redirectUris) || !client.redirectUris.includes(txn.redirectUri)) {
+        delete state.txns[form.txn];
+        persist();
+        return { status: 400, html: page("Cannot start sign-in", "client_id is not registered.") };
+      }
+      if (!relayKeyAccepted(form.relay_key, config.relayApiKey)) {
+        return {
+          status: 401,
+          html: page(
+            "Key did not match",
+            `<p>The relay key was not accepted.</p>
+             <form method="post" action="/authorize">
+               <input type="hidden" name="txn" value="${escapeHtml(form.txn)}">
+               <label>Relay key <input type="password" name="relay_key" autocomplete="current-password" required></label>
+               <button type="submit">Allow</button>
+             </form>`,
+          ),
+        };
       }
       delete state.txns[form.txn];
       const code = randomBytes(24).toString("base64url");
@@ -121,7 +132,6 @@ export function createOAuth(config) {
         challenge: txn.challenge,
         expiresAt: Date.now() + CODE_TTL_MS,
       };
-      rememberClient(state, txn.clientId, txn.redirectUri);
       persist();
       const location = new URL(txn.redirectUri);
       location.searchParams.set("code", code);
@@ -139,10 +149,21 @@ export function createOAuth(config) {
 }
 
 export function publicBaseFrom(req, config) {
-  if (config.publicBaseUrl) return config.publicBaseUrl;
-  const proto = String(req.headers["x-forwarded-proto"] || "http").split(",")[0].trim();
-  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "127.0.0.1").split(",")[0].trim();
-  return `${proto}://${host}`;
+  const configured = typeof config.publicBaseUrl === "string" ? config.publicBaseUrl.trim() : "";
+  if (configured) return configured;
+  const host = String(req.headers?.host || "").split(",")[0].trim();
+  if (isLoopbackHost(host)) return `http://${host}`;
+  return `http://127.0.0.1:${config.port || 8787}`;
+}
+
+export function assertOAuthPublicBase(config) {
+  if (typeof config.publicBaseUrl === "string" && config.publicBaseUrl.trim()) return;
+  const production = String(config.nodeEnv || "").trim().toLowerCase() === "production";
+  const message = production
+    ? "RELAY_PUBLIC_BASE_URL is required in production. Refusing to start because OAuth will not trust X-Forwarded-Host."
+    : "RELAY_PUBLIC_BASE_URL is not set. OAuth metadata ignores X-Forwarded-Host and X-Forwarded-Proto. Set RELAY_PUBLIC_BASE_URL before using a public hostname.";
+  if (production) throw new Error(message);
+  console.error(`warning: ${message}`);
 }
 
 function exchangeCode(state, form, persist) {
@@ -194,27 +215,19 @@ function checkAuthorizeQuery(query, state) {
   if (query.code_challenge_method !== "S256" || !query.code_challenge) {
     return { error: "PKCE S256 is required." };
   }
-  if (!allowedRedirect(query.redirect_uri || "")) return { error: "redirect_uri is not allowed." };
+  if (!query.client_id) return { error: "client_id is required." };
   const client = state.clients[query.client_id];
-  if (client && !client.redirectUris.includes(query.redirect_uri)) {
+  if (!client || !Array.isArray(client.redirectUris)) return { error: "client_id is not registered." };
+  if (!allowedRedirect(query.redirect_uri || "")) return { error: "redirect_uri is not allowed." };
+  if (!client.redirectUris.includes(query.redirect_uri)) {
     return { error: "redirect_uri is not registered for this client." };
   }
-  if (!query.client_id) return { error: "client_id is required." };
   return {
     clientId: query.client_id,
     redirectUri: query.redirect_uri,
     challenge: query.code_challenge,
     oauthState: query.state || "",
   };
-}
-
-function rememberClient(state, clientId, redirectUri) {
-  const existing = state.clients[clientId];
-  if (!existing) {
-    state.clients[clientId] = { redirectUris: [redirectUri], name: "MCP client" };
-    return;
-  }
-  if (!existing.redirectUris.includes(redirectUri)) existing.redirectUris.push(redirectUri);
 }
 
 function allowedRedirect(uri) {
@@ -248,6 +261,25 @@ function loadStore(filePath) {
     };
   } catch {
     return { clients: {}, codes: {}, tokens: {}, refresh: {}, txns: {} };
+  }
+}
+
+export function relayKeyAccepted(submitted, expected) {
+  if (!presentSecret(expected) || !presentSecret(submitted)) return false;
+  return safeEqual(submitted, expected);
+}
+
+function presentSecret(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isLoopbackHost(host) {
+  if (!host) return false;
+  try {
+    const name = new URL(`http://${host}`).hostname.replace(/^\[|\]$/g, "");
+    return name === "127.0.0.1" || name === "localhost" || name === "::1";
+  } catch {
+    return false;
   }
 }
 

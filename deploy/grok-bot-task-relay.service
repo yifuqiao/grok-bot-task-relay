@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 WorkingDirectory=/opt/grok-bot-task-relay
 EnvironmentFile=/etc/grok-bot-task-relay.env
+Environment=NODE_ENV=production
 ExecStart=/usr/bin/node src/http.js
 Restart=always
 RestartSec=3

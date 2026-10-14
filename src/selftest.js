@@ -400,9 +400,17 @@ await check("OAuth discovery and consent issue a bearer token", async () => {
   const verifier = "relay-oauth-verifier-0123456789";
   const challenge = createHash("sha256").update(verifier).digest("base64url");
   const redirectUri = "http://127.0.0.1/callback";
+  const registered = await fetch(`${base}/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ client_name: "ChatGPT", redirect_uris: [redirectUri] }),
+  });
+  const client = await registered.json();
+  assert.equal(registered.status, 201);
+  assert.ok(client.client_id);
   const start = new URL(`${base}/authorize`);
   start.searchParams.set("response_type", "code");
-  start.searchParams.set("client_id", "chatgpt");
+  start.searchParams.set("client_id", client.client_id);
   start.searchParams.set("redirect_uri", redirectUri);
   start.searchParams.set("code_challenge", challenge);
   start.searchParams.set("code_challenge_method", "S256");
@@ -438,7 +446,7 @@ await check("OAuth discovery and consent issue a bearer token", async () => {
     body: new URLSearchParams({
       grant_type: "authorization_code",
       code,
-      client_id: "chatgpt",
+      client_id: client.client_id,
       redirect_uri: redirectUri,
       code_verifier: verifier,
     }),

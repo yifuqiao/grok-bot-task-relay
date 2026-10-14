@@ -15,6 +15,8 @@ console.log(
     webhookUrl: config.webhookUrl ? "set" : "missing",
     webhookKey: config.webhookKey ? "set" : "missing",
     relayApiKey: config.relayApiKey ? "set" : "missing",
+    publicBaseUrl: config.publicBaseUrl ? "set" : "missing",
+    nodeEnv: config.nodeEnv || "(unset)",
     cursorApiKey: config.cursorApiKey ? "set" : "missing",
     cursorGithubToken: config.cursorGithubToken ? "set" : "missing",
     authHeader: config.authHeader,
