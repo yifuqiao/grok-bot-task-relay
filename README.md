@@ -71,8 +71,8 @@ Cursor 的 MCP 配置使用 stdio。进程会自己读取项目里的 `.env`。
 relay 上用 systemd 和一份只有 root 能读的环境文件，不把密钥写进代码：
 
 - 程序目录：`/opt/grok-bot-task-relay`
-- 环境文件：`/etc/grok-bot-task-relay.env`（`GROK_BOT_WEBHOOK_URL`、`GROK_BOT_WEBHOOK_KEY`、`RELAY_API_KEY`）
-- 服务单元：`deploy/grok-bot-task-relay.service`
+- 环境文件：`/etc/grok-bot-task-relay.env`（`GROK_BOT_WEBHOOK_URL`、`GROK_BOT_WEBHOOK_KEY`、`RELAY_API_KEY`、`RELAY_PUBLIC_BASE_URL`）
+- 服务单元：`deploy/grok-bot-task-relay.service`（设置 `NODE_ENV=production`。未配置 `RELAY_PUBLIC_BASE_URL` 时进程拒绝启动，OAuth 不使用 `X-Forwarded-Host`）
 - 对外地址：在现有 Caddy 上反代到 `127.0.0.1:8787`，见 `deploy/Caddyfile.snippet`
 - 运行环境：Node.js 22 或更新版本
 
@@ -100,7 +100,9 @@ cloudflared tunnel --url http://127.0.0.1:8787
 
 Claude 的网页版如果看不到 Request headers，说明当前账号还不能保存固定钥匙，需要改用 OAuth。那时候不要把服务改成免认证。
 
-ChatGPT 的自定义 MCP 会先找 OAuth。环境里要有 `RELAY_PUBLIC_BASE_URL`（例如 `https://relay.onetopway.com`，不要带路径或结尾斜杠）。Caddy 必须反代整个站点，不能只转发 `/mcp`，否则 `/.well-known` 会 404。同意页核对的是现有的 `RELAY_API_KEY`。Bearer 钥匙仍然可以直接调用，OAuth 通过后发给聊天应用的是另一把访问令牌。
+ChatGPT 的自定义 MCP 会先找 OAuth。环境里要有 `RELAY_PUBLIC_BASE_URL`（例如 `https://relay.onetopway.com`，不要带路径或结尾斜杠）。生产环境（`NODE_ENV=production`）没设这个地址时，HTTP 服务拒绝启动，并且不会用请求里的 `X-Forwarded-Host` 拼发现地址。Caddy 必须反代整个站点，不能只转发 `/mcp`，否则 `/.well-known` 会 404。同意页核对的是现有的 `RELAY_API_KEY`；这把钥匙为空时同意页直接拒绝。Bearer 钥匙仍然可以直接调用，OAuth 通过后发给聊天应用的是另一把访问令牌。
+
+聊天客户端要先 `POST /register`（RFC 7591）拿到 `client_id`，再用它打开同意页。没有注册过的 `client_id` 会被拒绝。Grok 自定义连接器和 Muse Code 在发现 `registration_endpoint` 后会自己做这次注册。已经写在 `oauth-grants.json` 里的客户端不用重新注册。
 
 ## ChatGPT 看 Grok Bot 的执行状态
 

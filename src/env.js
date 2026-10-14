@@ -36,6 +36,7 @@ export function loadConfig() {
       .toLowerCase(),
     authScheme: scheme === undefined ? "Bearer" : scheme.trim(),
     relayApiKey: (process.env.RELAY_API_KEY || "").trim(),
+    nodeEnv: (process.env.NODE_ENV || "").trim(),
     port: Number(process.env.PORT || 8787),
     host: (process.env.HOST || "127.0.0.1").trim(),
     timeoutMs: Number(process.env.GROK_BOT_WEBHOOK_TIMEOUT_MS || 30000),
