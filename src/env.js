@@ -60,7 +60,32 @@ export function loadConfig() {
     callbackTargets: jsonSetting("RELAY_CALLBACK_TARGETS"),
     cursorApiKey: (process.env.CURSOR_API_KEY || "").trim(),
     cursorGithubToken: (process.env.CURSOR_GITHUB_TOKEN || "").trim(),
+    deployTargets: jsonSetting("RELAY_DEPLOY_TARGETS"),
+    githubToken: (process.env.RELAY_GITHUB_TOKEN || "").trim(),
+    githubRepos: (process.env.RELAY_GITHUB_REPOS || "")
+      .split(",")
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean),
+    approvalKey: (process.env.RELAY_APPROVAL_KEY || "").trim(),
   };
+}
+
+export const REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+const TARGET_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+function checkDeployTarget(name, target) {
+  if (!TARGET_NAME.test(name) || !target || typeof target !== "object" || Array.isArray(target)) throw new Error();
+  const owners = Array.isArray(target.owners) ? target.owners : [target.owner ?? "default"];
+  if (!owners.length || owners.some((owner) => typeof owner !== "string" || !owner)) throw new Error();
+  if (typeof target.repo !== "string" || !REPO.test(target.repo)) throw new Error();
+  if (target.environment !== undefined && (typeof target.environment !== "string" || !target.environment.trim())) throw new Error();
+  if (target.health_url !== undefined) {
+    const url = new URL(target.health_url);
+    if (url.protocol !== "https:" || url.username || url.password) throw new Error();
+  }
+  if (target.health_sha_field !== undefined && (typeof target.health_sha_field !== "string" || !/^[A-Za-z0-9_.]{1,80}$/.test(target.health_sha_field))) throw new Error();
+  if (target.requires_approval !== undefined && typeof target.requires_approval !== "boolean") throw new Error();
+  if (target.description !== undefined && typeof target.description !== "string") throw new Error();
 }
 
 function jsonSetting(name) {
@@ -73,6 +98,8 @@ function jsonSetting(name) {
       }
       const keys = Object.values(value);
       if (new Set(keys).size !== keys.length || keys.includes((process.env.RELAY_API_KEY || "").trim())) throw new Error();
+    } else if (name === "RELAY_DEPLOY_TARGETS") {
+      for (const [targetName, target] of Object.entries(value)) checkDeployTarget(targetName, target);
     } else {
       for (const target of Object.values(value)) {
         const url = new URL(target.url);

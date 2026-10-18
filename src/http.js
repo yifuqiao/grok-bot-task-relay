@@ -3,7 +3,9 @@ import fs from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { loadConfig, loadEnvFile } from "./env.js";
-import { handleMcp, SERVER_VERSION, submitTask } from "./mcp.js";
+import { callLifecycle, handleMcp, SERVER_VERSION, submitTask } from "./mcp.js";
+import { approvalPage } from "./approval.js";
+import { currentRevision } from "./revision.js";
 import { assertOAuthPublicBase, createOAuth, publicBaseFrom } from "./oauth.js";
 import { isDirectRun, projectRoot } from "./stdio.js";
 import { progressStatus, readStatus } from "./grok-status.js";
@@ -23,6 +25,11 @@ export function createRequestListener(config, fetchImpl = fetch) {
       const base = publicBaseFrom(req, config);
       if (isOAuthRoute(url.pathname)) {
         return handleOAuth(req, res, url, base, oauth);
+      }
+      const approval = url.pathname.match(/^\/approvals\/([a-f0-9-]{36})$/);
+      if (approval) {
+        // A human page with its own key check, like the OAuth consent page.
+        return handleApproval(req, res, approval[1], config, fetchImpl);
       }
       if (!hostAllowed(req, config) || !originAllowed(req, config)) {
         return sendJson(res, 403, { error: "Origin or host is not allowed." });
@@ -69,7 +76,20 @@ export function createRequestListener(config, fetchImpl = fetch) {
         }
         return sendJson(res, 405, { error: "Method not allowed." });
       }
-      const taskRoute = url.pathname.match(/^\/tasks\/([a-f0-9-]{36})(?:\/(result|notify))?$/);
+      if (url.pathname === "/tasks" || url.pathname === "/deploy-targets" || url.pathname === "/deploy") {
+        const owner = caller(req, config, oauth);
+        if (owner === null) return sendJson(res, 401, { error: "Unauthorized." });
+        const expected = url.pathname === "/deploy" ? "POST" : "GET";
+        if (req.method !== expected) return sendJson(res, 405, { error: "Method not allowed." });
+        const args = url.pathname === "/deploy"
+          ? JSON.parse((await readBody(req)) || "{}")
+          : { limit: url.searchParams.get("limit") ?? undefined, status: url.searchParams.get("status") ?? undefined };
+        const name = { "/tasks": "listTasks", "/deploy-targets": "listDeployTargets", "/deploy": "deployRelease" }[url.pathname];
+        const outcome = await callLifecycle(name, args, config, fetchImpl, owner);
+        if (name === "deployRelease" && !outcome.isError) return sendJson(res, relayStatus(outcome.result), outcome.result);
+        return sendJson(res, outcome.isError ? (outcome.result.error?.includes("lifecycle mode") ? 503 : 400) : 200, outcome.result);
+      }
+      const taskRoute = url.pathname.match(/^\/tasks\/([a-f0-9-]{36})(?:\/(result|notify|verify))?$/);
       if (taskRoute) {
         const owner = caller(req, config, oauth);
         if (owner === null) return sendJson(res, 401, { error: "Unauthorized." });
@@ -81,7 +101,18 @@ export function createRequestListener(config, fetchImpl = fetch) {
             const outcome = await service.notify(record.relayTaskId, owner);
             return sendJson(res, outcome.status, outcome.body);
           }
-          if (req.method === "GET" && taskRoute[2] !== "notify") {
+          if (req.method === "POST" && taskRoute[2] === "verify") {
+            const outcome = await service.reverify(record.relayTaskId, owner);
+            return sendJson(res, outcome.isError ? 409 : 200, outcome.result);
+          }
+          if (req.method === "GET" && !["notify", "verify"].includes(taskRoute[2])) {
+            if (url.searchParams.has("wait")) {
+              const waited = await service.waitFor(record.relayTaskId, owner, {
+                sinceUpdatedAt: url.searchParams.get("since") || undefined,
+                waitSeconds: Number(url.searchParams.get("wait")),
+              });
+              return sendJson(res, 200, withReceipt({ ...service.view(waited.record), changed: waited.changed, timedOut: waited.timedOut }));
+            }
             return sendJson(res, 200, withReceipt(service.view(record)));
           }
           return sendJson(res, 405, { error: "Method not allowed." });
@@ -100,6 +131,7 @@ export function createRequestListener(config, fetchImpl = fetch) {
         return sendJson(res, 200, {
           status: "up",
           version: SERVER_VERSION,
+          commit: currentRevision(),
           deliveryMode: config.deliveryMode || "webhook",
           webhookConfigured: Boolean(config.webhookUrl && config.webhookKey),
           statusReports: Boolean(config.botReportKey && (config.dataDir || config.statusDir)),
@@ -124,7 +156,7 @@ export function createRequestListener(config, fetchImpl = fetch) {
       }
 
       if (req.method === "GET" || req.method === "DELETE") {
-        return sendJson(res, 405, { error: "This relay is stateless. Use POST." });
+        return sendJson(res, 405, { error: "Method not allowed. MCP uses POST /mcp." });
       }
       if (req.method !== "POST") {
         return sendJson(res, 405, { error: "Method not allowed." });
@@ -169,6 +201,35 @@ export function startServer(config, fetchImpl = fetch) {
   return new Promise((resolve) => {
     server.listen(config.port, config.host, () => resolve(server));
   });
+}
+
+const approvalFailures = new Map();
+
+async function handleApproval(req, res, id, config, fetchImpl) {
+  const service = taskService(config);
+  if (!service) return sendHtml(res, 503, approvalPage({ message: "任务生命周期未启用。" }));
+  const record = service.records.get(id);
+  if (!record) return sendHtml(res, 404, approvalPage({ message: "找不到这个任务。" }));
+  if (req.method === "GET") return sendHtml(res, 200, approvalPage({ record, view: service.view(record) }));
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed." });
+  const form = parseBody(await readBody(req), req.headers["content-type"]);
+  const failures = approvalFailures.get(id) || 0;
+  if (failures >= 10) return sendHtml(res, 429, approvalPage({ record, view: service.view(record), message: "错误次数过多，这个任务的审批已锁定。重启服务后才能再试。" }));
+  const key = service.approvalKey();
+  if (!key || typeof form.approval_key !== "string" || !safeEqual(form.approval_key.trim(), key)) {
+    approvalFailures.set(id, failures + 1);
+    return sendHtml(res, 401, approvalPage({ record, view: service.view(record), message: "审批钥匙不对。" }));
+  }
+  approvalFailures.delete(id);
+  const decision = form.decision === "approve" ? "approved" : form.decision === "decline" ? "declined" : null;
+  if (!decision) return sendHtml(res, 400, approvalPage({ record, view: service.view(record), message: "请选择批准或拒绝。" }));
+  const outcome = await service.decide(id, decision, fetchImpl);
+  const current = service.records.get(id);
+  const message = outcome.status === 409 ? outcome.body.error
+    : current.status === "awaiting_approval" ? `没有发出：${outcome.body.error || "中转配置不完整"}`
+    : decision === "declined" ? "已拒绝，这次部署不会发给 Grok Bot。"
+      : current.status === "submitted" || current.status === "queued" ? "已批准，已交给 Grok Bot。" : `已批准，但交付状态是 ${current.status}。`;
+  return sendHtml(res, outcome.status === 409 ? 409 : 200, approvalPage({ record: current, view: service.view(current), message }));
 }
 
 function authorized(req, config, oauth) {
@@ -260,6 +321,8 @@ function sendHtml(res, status, html) {
     "content-type": "text/html; charset=utf-8",
     "content-length": payload.length,
     "cache-control": "no-store",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
   });
   res.end(payload);
 }

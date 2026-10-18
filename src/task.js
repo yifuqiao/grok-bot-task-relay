@@ -1,5 +1,7 @@
 const PRIORITIES = new Set(["low", "normal", "high", "urgent"]);
 const APPROVAL_HINTS = new Set(["spend", "send_external", "delete", "other"]);
+const REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+const SHA = /^[a-fA-F0-9]{40}$/;
 
 export function validateAndNormalize(input, { maxBytes = 3000 } = {}) {
   const errors = [];
@@ -52,6 +54,8 @@ export function validateAndNormalize(input, { maxBytes = 3000 } = {}) {
   if (input.attachments !== undefined) {
     task.attachments = normalizeAttachments(input.attachments, errors);
   }
+  if (input.github !== undefined) task.github = normalizeGithub(input.github, errors);
+  if (input.deploy !== undefined) task.deploy = normalizeDeploy(input.deploy, errors);
 
   if (input.approval_hints !== undefined) {
     if (!Array.isArray(input.approval_hints)) {
@@ -103,6 +107,60 @@ export function normalizeAttachments(value, errors) {
     }
     return file;
   });
+}
+
+// Where GitHub receipts go. The relay only posts to repositories the operator allowed.
+export function normalizeGithub(value, errors) {
+  if (!isPlainObject(value)) {
+    errors.push("github must be an object with repo and pr_number or commit_sha.");
+    return {};
+  }
+  const out = {};
+  if (typeof value.repo !== "string" || !REPO.test(value.repo)) errors.push("github.repo must look like owner/name.");
+  else out.repo = value.repo;
+  if (value.pr_number !== undefined) {
+    if (!Number.isSafeInteger(value.pr_number) || value.pr_number < 1) errors.push("github.pr_number must be a positive integer.");
+    else out.pr_number = value.pr_number;
+  }
+  if (value.commit_sha !== undefined) {
+    if (typeof value.commit_sha !== "string" || !SHA.test(value.commit_sha)) errors.push("github.commit_sha must be a full 40-character sha.");
+    else out.commit_sha = value.commit_sha.toLowerCase();
+  }
+  if (out.pr_number === undefined && out.commit_sha === undefined && value.repo !== undefined) {
+    errors.push("github needs pr_number or commit_sha.");
+  }
+  for (const key of Object.keys(value)) {
+    if (!["repo", "pr_number", "commit_sha"].includes(key)) errors.push(`github.${key} is not supported.`);
+  }
+  return out;
+}
+
+export function normalizeDeploy(value, errors) {
+  if (!isPlainObject(value)) {
+    errors.push("deploy must be an object with target and commit_sha.");
+    return {};
+  }
+  const out = {};
+  if (typeof value.target !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(value.target)) errors.push("deploy.target must be a registered target name.");
+  else out.target = value.target;
+  if (typeof value.commit_sha !== "string" || !SHA.test(value.commit_sha)) errors.push("deploy.commit_sha must be a full 40-character sha. Branch names are not accepted.");
+  else out.commit_sha = value.commit_sha.toLowerCase();
+  if (value.rollback_sha !== undefined) {
+    if (typeof value.rollback_sha !== "string" || !SHA.test(value.rollback_sha)) errors.push("deploy.rollback_sha must be a full 40-character sha.");
+    else out.rollback_sha = value.rollback_sha.toLowerCase();
+  }
+  if (value.pr_number !== undefined) {
+    if (!Number.isSafeInteger(value.pr_number) || value.pr_number < 1) errors.push("deploy.pr_number must be a positive integer.");
+    else out.pr_number = value.pr_number;
+  }
+  if (value.notes !== undefined) {
+    if (typeof value.notes !== "string" || value.notes.length > 4000) errors.push("deploy.notes must be a string of at most 4000 characters.");
+    else out.notes = value.notes;
+  }
+  for (const key of Object.keys(value)) {
+    if (!["target", "commit_sha", "rollback_sha", "pr_number", "notes"].includes(key)) errors.push(`deploy.${key} is not supported.`);
+  }
+  return out;
 }
 
 function requiredText(value, name, max, errors) {

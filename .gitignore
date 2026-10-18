@@ -6,3 +6,4 @@ sync-out.tgz
 *.env.out
 .DS_Store
 data/
+REVISION

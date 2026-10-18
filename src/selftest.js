@@ -269,7 +269,7 @@ await check("MCP lists submitTaskToGrokBot and returns transport status", async 
     { webhookUrl: fake.url, webhookKey, authScheme: "Bearer", timeoutMs: 3000, deliveryMode: "webhook", statusDir: "data/grok-status", botReportKey: "report" },
   );
   assert.equal(info.result.isError, false);
-  assert.equal(info.result.structuredContent.version, "1.1.3");
+  assert.equal(info.result.structuredContent.version, "1.2.0");
   assert.equal(info.result.structuredContent.name, "grok-bot-task-relay");
 
   const called = await handleMcp(
