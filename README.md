@@ -6,6 +6,12 @@
 
 Grok Bot 收到的是一次执行请求。闲聊和头脑风暴不要走这条链路。
 
+## 部署和回执（Claude、Cursor、ChatGPT 通用）
+
+写好代码、开好 PR 之后，调用方用 `deployRelease` 让 Grok Bot 部署指定 commit。部署目标在 relay 的环境文件里登记，模型只能选名字。生产目标可以要求先在中转的审批页人工批准。Grok Bot 报告完成后，中转自己读取目标的 health 地址，核对正在运行的 commit，然后把结果写成 PR 上的 commit status 和评论。调用方可以用 `waitForTask` 等下一条回报，也可以订阅 PR 被评论唤醒。
+
+配置、工具、状态含义和安全边界见 [Claude ⇄ Grok Bot：部署、任务和回执](docs/claude-deploy.md)。
+
 ## 多平台任务、附件和完成回报
 
 新增的持久任务模式同时服务 MCP 和 HTTP API，支持文件/图片引用、Markdown 正文、任务查询、同一调用方的提交去重以及完成通知。默认不启用，原来的单次转发配置继续工作。
@@ -14,7 +20,7 @@ Grok Bot 收到的是一次执行请求。闲聊和头脑风暴不要走这条�
 
 启用后，在现有配置基础上设置 `RELAY_DATA_DIR`、稳定公网 HTTPS 的 `RELAY_PUBLIC_BASE_URL`，以及与调用方钥匙不同的 `BOT_REPORT_KEY`。Grok Bot 必须能够用该执行端钥匙读取任务清单和提交完成报告。
 
-MCP 提供 `submitTaskToGrokBot`、`getTaskStatus`、`getTaskResult`；API 提供提交、查询、执行端回报和通知重发接口。需要通知时，管理员在私有环境文件中登记回调目标，任务只填写目标名称。未登记回调时，可使用查询工具读取结果。
+MCP 提供 `submitTaskToGrokBot`、`getTaskStatus`、`getTaskResult`、`waitForTask`、`listTasks`，以及部署用的 `listDeployTargets`、`deployRelease`、`verifyDeployment`；API 提供提交、查询、执行端回报和通知重发接口。需要通知时，管理员在私有环境文件中登记回调目标，任务只填写目标名称。未登记回调时，可使用查询工具读取结果。
 
 `finished` 只由经过认证的 Grok Bot 完成报告触发。webhook 返回 200、分配了中转任务编号、收到 Bot 的接收确认，都不等于执行完成。通知失败不改变任务执行结果，也不会自动再次执行任务。
 
@@ -76,7 +82,7 @@ relay 上用 systemd 和一份只有 root 能读的环境文件，不把密钥�
 - 对外地址：在现有 Caddy 上反代到 `127.0.0.1:8787`，见 `deploy/Caddyfile.snippet`
 - 运行环境：Node.js 22 或更新版本
 
-这台电脑目前没有该 relay 的 SSH 密钥，所以还没有登录，也没有把密钥拷上去。
+线上地址是 `https://relay.onetopway.com`，`/health` 会返回版本和正在运行的 commit。拷贝部署不带 `.git` 时，在程序目录写一个 `REVISION` 文件（`git rev-parse HEAD > REVISION`），或者在环境文件里设 `RELAY_GIT_SHA`。
 
 ## 接到 ChatGPT、Claude、Grok、Muse
 
@@ -92,13 +98,13 @@ cloudflared tunnel --url http://127.0.0.1:8787
 | 平台 | 在哪里加 | 认证 |
 | --- | --- | --- |
 | Cursor | 已写入本机 `mcp.json`，用本地进程，不经过隧道 | 进程自己读 `.env` |
-| Claude | Settings → Connectors → Add custom connector | Request header 选 `authorization`，值写 `Bearer <RELAY_API_KEY>`，`Bearer` 和密钥之间有一个空格 |
+| Claude | Settings → Connectors → Add custom connector | 用 OAuth，同意页输入 `RELAY_API_KEY`。连好后 claude.ai 和 Claude Code 云端会话都能用。也可以用 Request header `authorization: Bearer <钥匙>`，详见 [docs/claude-deploy.md](docs/claude-deploy.md) |
 | ChatGPT | Plugins → Add custom MCP server | 地址填公网 `https://<域名>/mcp`，认证选 OAuth。同意页里输入 `RELAY_API_KEY`，不要贴进聊天 |
 | Grok | grok.com/connectors → New Connector → Custom | 地址同上。有 authorization 字段时填这把 Bearer 钥匙 |
 | Muse 聊天 App | 没有自定义 MCP 入口 | 用 Muse Code |
 | Muse Code | `~/.config/muse/settings.json` 的 `mcp_servers` | `url` 填 MCP 地址，并带上同一个 authorization header |
 
-Claude 的网页版如果看不到 Request headers，说明当前账号还不能保存固定钥匙，需要改用 OAuth。那时候不要把服务改成免认证。
+不管用哪种认证，都不要把服务改成免认证。
 
 ChatGPT 的自定义 MCP 会先找 OAuth。环境里要有 `RELAY_PUBLIC_BASE_URL`（例如 `https://relay.onetopway.com`，不要带路径或结尾斜杠）。生产环境（`NODE_ENV=production`）没设这个地址时，HTTP 服务拒绝启动，并且不会用请求里的 `X-Forwarded-Host` 拼发现地址。Caddy 必须反代整个站点，不能只转发 `/mcp`，否则 `/.well-known` 会 404。同意页核对的是现有的 `RELAY_API_KEY`；这把钥匙为空时同意页直接拒绝。Bearer 钥匙仍然可以直接调用，OAuth 通过后发给聊天应用的是另一把访问令牌。
 
