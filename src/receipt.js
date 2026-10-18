@@ -11,7 +11,7 @@ export function withReceipt(result) {
       botAcknowledged: result.botAcknowledged ?? result.transport?.botAcknowledged ?? false,
       runUuid: result.runUuid ?? result.transport?.runUuid ?? null,
       statusTool: "getTaskStatus",
-      note: "Keep relayTaskId. Call getTaskStatus once when the user asks about progress. HTTP acceptance is not a Grok Bot receipt; received, executing, waiting_approval, finished, and failed come from authenticated progress reports.",
+      note: "Keep relayTaskId. Call getTaskStatus once when the user asks about progress. HTTP acceptance is not a Grok Bot receipt; received, forwarded, executing, waiting_approval, finished, and failed come from authenticated progress reports. forwarded is not done.",
     },
   };
 }

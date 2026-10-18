@@ -28,6 +28,8 @@ export function desiredStatus(record) {
     case "received":
     case "executing":
       return { state: "pending", description: `Grok Bot ${record.status}: ${summary || ""}` };
+    case "forwarded":
+      return { state: "pending", description: `Forwarded to another bot: ${summary || ""}` };
     case "waiting_approval":
       return { state: "pending", description: `Grok Bot waits for approval: ${summary || ""}` };
     case "finished": {

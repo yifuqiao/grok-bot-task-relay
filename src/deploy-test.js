@@ -342,6 +342,27 @@ try {
     taskServiceClose(settings);
   });
 
+  await check("an intake bot reports forwarded and the executing bot still closes the task", async () => {
+    const net = fakeNet();
+    const settings = config(net);
+    const base = await listen(settings);
+    const task = { title: "Sort then run", objective: "Route to the right bot", completion_criteria: ["Done"], source: "claude",
+      github: { repo: "yifuqiao/notes", pr_number: 4 } };
+    const { relayTaskId: id } = (await call(settings, "submitTaskToGrokBot", task)).structuredContent;
+    await post(`${base}/executor/tasks/${id}/progress`, { event_id: "sort-received", status: "received", summary: "Intake got it" });
+    const forwarded = await post(`${base}/executor/tasks/${id}/progress`, { event_id: "sort-forwarded", status: "forwarded", summary: "Sent to the ops bot" });
+    assert.equal(forwarded.status, 200);
+    assert.equal((await forwarded.json()).status, "forwarded");
+    assert.match(net.calls.github.filter((c) => c.path.includes("/statuses/")).at(-1).body.description, /Forwarded/);
+    await post(`${base}/executor/tasks/${id}/progress`, { event_id: "ops-executing", status: "executing", summary: "Ops bot running" });
+    const done = await post(`${base}/executor/tasks/${id}/progress`, { event_id: "ops-finished", status: "finished", summary: "Ops bot finished" });
+    assert.equal(done.status, 200);
+    const view = await done.json();
+    assert.equal(view.status, "finished");
+    assert.deepEqual(view.updates.map((u) => u.status), ["received", "forwarded", "executing"]);
+    taskServiceClose(settings);
+  });
+
   await check("health reports the running commit", async () => {
     const net = fakeNet();
     const settings = config(net);

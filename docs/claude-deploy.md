@@ -86,6 +86,7 @@ HTTP 也有对应接口，都用调用方的 Bearer 钥匙：`POST /deploy`、`G
 | `awaiting_approval` | 停在中转，还没发给 Grok Bot。结果里的 `approvalUrl` 交给人去批准 |
 | `submitted` / `queued` | 已交给 Grok Bot（或进入收件箱），还没有回报 |
 | `received` / `executing` / `waiting_approval` | Grok Bot 的进度回报。`waiting_approval` 是 Bot 自己停下来等人确认 |
+| `forwarded` | 收件或分拣 Bot 把任务转给了另一个 Bot，还没有执行。接手的 Bot 继续用同一个 relay_task_id 回报 |
 | `finished` | Bot 报告完成。部署任务还要看 `verification.status` |
 | `failed` | Bot 报告失败 |
 | `rejected` | webhook 拒绝，或者审批人拒绝了（`approval.decision` 为 `declined`） |

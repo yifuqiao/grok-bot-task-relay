@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const ID = /^[a-f0-9-]{36}$/;
-const PROGRESS = new Set(["received", "executing", "waiting_approval"]);
+const PROGRESS = new Set(["received", "forwarded", "executing", "waiting_approval"]);
 const TERMINAL = new Set(["finished", "failed"]);
 const CLOSED = new Set(["finished", "failed", "rejected", "dry_run"]);
 
@@ -72,7 +72,7 @@ export function checkProgress(record, input) {
     return { error: { status: 400, body: { error: "event_id is required (max 120 characters)." } } };
   }
   if (!PROGRESS.has(status) && !TERMINAL.has(status)) {
-    return { error: { status: 400, body: { error: "status must be received, executing, waiting_approval, finished, or failed." } } };
+    return { error: { status: 400, body: { error: "status must be received, forwarded, executing, waiting_approval, finished, or failed. A bot that only routes the task to another bot reports forwarded, not finished." } } };
   }
   const maxSummary = TERMINAL.has(status) ? 8000 : 2000;
   if (!summary || summary.length > maxSummary) {
