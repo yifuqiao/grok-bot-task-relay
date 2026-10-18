@@ -52,7 +52,7 @@ RELAY_GITHUB_REPOS=yifuqiao/grok-bot-task-relay
 | 设置 | 作用 |
 | --- | --- |
 | `RELAY_DEPLOY_TARGETS` | 部署目标白名单。模型只能挑名字，仓库、环境、health 地址都来自这里。`owners` 限定哪些调用方能用；`requires_approval` 让部署先停在中转等人批准。 |
-| `RELAY_APPROVAL_KEY` | 只给人用的审批钥匙。有目标需要审批时必须配置，不能和调用方或执行端钥匙相同。聊天平台和 AI 都拿不到它，所以 AI 不能自己批准生产部署。 |
+| `RELAY_APPROVAL_KEY` | 只给人用的审批钥匙，至少 24 个字符。有目标需要审批时必须配置，不能和调用方或执行端钥匙相同。聊天平台和 AI 都拿不到它，所以 AI 不能自己批准生产部署。 |
 | `RELAY_GITHUB_TOKEN` | 用来发 commit status 和 PR 评论。建议用 fine-grained token，只授权相关仓库的 Commit statuses: write 和 Pull requests: write。 |
 | `RELAY_GITHUB_REPOS` | 普通任务（非部署）可以回执到的仓库。部署目标的仓库自动允许。 |
 
@@ -115,7 +115,7 @@ Claude Code 云端会话订阅了 PR 之后，PR 评论会把会话唤醒，所�
 
 - 模型只能选登记过的目标名，不能指定主机、命令或 health 地址。
 - 部署只接受完整 commit sha，避免“部署 main”时实际部署了别的提交。
-- 生产目标设 `requires_approval`，中转在拿到人工批准前不会联系 Grok Bot。审批页按任务限制错误次数，连续错 10 次就锁定。
+- 生产目标设 `requires_approval`，中转在拿到人工批准前不会联系 Grok Bot。审批钥匙至少 24 个字符；输错一次要等 1 秒才返回，用来拖慢猜测。审批链接会出现在 PR 评论里，所以输错不会锁定任务，免得别人故意输错把你挡在外面。
 - `finished` 只能由带执行端钥匙的回报产生。部署成功还要通过中转自己的 health 核对。
 - GitHub 回执只发到白名单仓库。
 

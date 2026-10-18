@@ -57,7 +57,7 @@ function config(net, extra = {}) {
   return {
     dataDir, webhookUrl: "https://webhook.example/task", webhookKey: "fake-webhook-key",
     relayApiKey: "fake-caller-key", clientKeys: { claude: "fake-claude-key" }, botReportKey: "fake-executor-key",
-    approvalKey: "fake-approval-key", publicBaseUrl: "https://relay.example", callbackTargets: {},
+    approvalKey: "fake-approval-key-0123456789", publicBaseUrl: "https://relay.example", callbackTargets: {},
     githubToken: "fake-github-token", githubRepos: ["yifuqiao/notes"],
     deployTargets: {
       "app-staging": { owners: ["default", "claude"], repo: "yifuqiao/app", environment: "staging",
@@ -66,7 +66,7 @@ function config(net, extra = {}) {
         health_url: "https://app.example/health", health_sha_field: "build.commit", requires_approval: true },
       "docs": { repo: "yifuqiao/docs" },
     },
-    fetchImpl: net, verifyAttempts: 1, verifyDelayMs: 0,
+    fetchImpl: net, verifyAttempts: 1, verifyDelayMs: 0, approvalFailureDelayMs: 0,
     timeoutMs: 1000, host: "127.0.0.1", port: 0, allowedOrigins: [], ...extra,
   };
 }
@@ -104,6 +104,7 @@ try {
     const net = fakeNet();
     assert.throws(() => new TaskService(config(net, { approvalKey: "fake-caller-key" })), /RELAY_APPROVAL_KEY must be separate/);
     assert.throws(() => new TaskService(config(net, { approvalKey: "" })), /need RELAY_APPROVAL_KEY/);
+    assert.throws(() => new TaskService(config(net, { approvalKey: "short-approval-key" })), /at least 24 characters/);
   });
 
   await check("MCP lists deploy, wait and list tools", async () => {
@@ -245,7 +246,7 @@ try {
     assert.equal((await form({ approval_key: "fake-claude-key", decision: "approve" })).status, 401);
     assert.equal((await form({ approval_key: "fake-caller-key", decision: "approve" })).status, 401);
     assert.equal(net.calls.webhook.length, 0);
-    const approved = await form({ approval_key: "fake-approval-key", decision: "approve" });
+    const approved = await form({ approval_key: "fake-approval-key-0123456789", decision: "approve" });
     assert.equal(approved.status, 200);
     assert.match(await approved.text(), /已批准/);
     assert.equal(net.calls.webhook.length, 1);
@@ -253,17 +254,68 @@ try {
     const view = (await call(settings, "getTaskStatus", { relay_task_id: id })).structuredContent;
     assert.equal(view.status, "submitted");
     assert.equal(view.approval.decision, "approved");
-    assert.equal((await form({ approval_key: "fake-approval-key", decision: "approve" })).status, 409);
+    assert.equal((await form({ approval_key: "fake-approval-key-0123456789", decision: "approve" })).status, 409);
     assert.equal(net.calls.webhook.length, 1);
 
     const other = (await call(settings, "deployRelease", { target: "app-prod", commit_sha: OTHER, source: "claude" })).structuredContent;
     const declined = await fetch(`${base}/approvals/${other.relayTaskId}`, { method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ approval_key: "fake-approval-key", decision: "decline" }).toString() });
+      body: new URLSearchParams({ approval_key: "fake-approval-key-0123456789", decision: "decline" }).toString() });
     assert.equal(declined.status, 200);
     const closed = (await call(settings, "getTaskStatus", { relay_task_id: other.relayTaskId })).structuredContent;
     assert.equal(closed.status, "rejected");
     assert.equal(net.calls.webhook.length, 1);
+    taskServiceClose(settings);
+  });
+
+  await check("wrong approval keys from strangers never lock out the real approver", async () => {
+    const net = fakeNet();
+    const settings = config(net);
+    const base = await listen(settings);
+    const { relayTaskId: id } = (await call(settings, "deployRelease", { target: "app-prod", commit_sha: SHA, source: "claude" })).structuredContent;
+    const form = (key) => fetch(`${base}/approvals/${id}`, { method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ approval_key: key, decision: "approve" }).toString() });
+    for (let i = 0; i < 12; i++) assert.equal((await form(`wrong-${i}`)).status, 401);
+    assert.equal(net.calls.webhook.length, 0);
+    assert.equal((await form("fake-approval-key-0123456789")).status, 200);
+    assert.equal(net.calls.webhook.length, 1);
+    taskServiceClose(settings);
+  });
+
+  await check("pull executors read the resolved deploy details from the manifest", async () => {
+    const net = fakeNet();
+    const settings = config(net, { deliveryMode: "pull", webhookUrl: "", webhookKey: "" });
+    const base = await listen(settings);
+    const queued = (await call(settings, "deployRelease", { target: "app-staging", commit_sha: SHA, pr_number: 5, notes: "Migrate first.", source: "claude" })).structuredContent;
+    assert.equal(queued.status, "queued");
+    const manifest = await (await fetch(`${base}/executor/tasks/${queued.relayTaskId}/manifest`, { headers: executor })).json();
+    assert.equal(manifest.kind, "deploy");
+    assert.equal(manifest.deploy.repo, "yifuqiao/app");
+    assert.equal(manifest.deploy.environment, "staging");
+    assert.equal(manifest.deploy.health_url, "https://app.example/health");
+    assert.equal(manifest.deploy.commit_sha, SHA);
+    assert.equal(manifest.deploy.notes, "Migrate first.");
+    assert.deepEqual(manifest.github, { repo: "yifuqiao/app", pr_number: 5 });
+    taskServiceClose(settings);
+  });
+
+  await check("a retried finished report resumes verification lost to a restart", async () => {
+    const net = fakeNet();
+    const settings = config(net);
+    const base = await listen(settings);
+    const service = taskService(settings);
+    const { relayTaskId: id } = (await call(settings, "deployRelease", { target: "app-staging", commit_sha: SHA, pr_number: 6, source: "claude" })).structuredContent;
+    const report = { event_id: "done", status: "finished", summary: "Deployed.", deployed_sha: SHA };
+    const record = service.records.get(id);
+    // State left behind when the relay stopped after saving the report and before verifying it.
+    record.completion = { event_id: report.event_id, status: report.status, summary: report.summary, artifacts: [], deployed_sha: SHA };
+    record.status = "finished";
+    service.save(record);
+    const replay = await (await post(`${base}/executor/tasks/${id}/report`, report)).json();
+    assert.equal(replay.deduplicated, true);
+    assert.equal(replay.verification.status, "verified");
+    assert.equal(net.calls.github.filter((c) => c.path === "/repos/yifuqiao/app/issues/6/comments").length, 1);
     taskServiceClose(settings);
   });
 

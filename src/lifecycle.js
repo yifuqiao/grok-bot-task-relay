@@ -39,6 +39,9 @@ export class TaskService {
     if (config.approvalKey && [config.botReportKey, ...callerKeys].includes(config.approvalKey)) {
       throw new Error("RELAY_APPROVAL_KEY must be separate from caller and executor credentials.");
     }
+    if (config.approvalKey && config.approvalKey.length < 24) {
+      throw new Error("RELAY_APPROVAL_KEY must be at least 24 characters.");
+    }
     if (Object.values(config.deployTargets || {}).some((target) => target.requires_approval) && !this.approvalKey()) {
       throw new Error("Deploy targets that require approval need RELAY_APPROVAL_KEY.");
     }
@@ -114,6 +117,20 @@ export class TaskService {
     fs.renameSync(temporary, file);
     this.records.set(record.relayTaskId, record);
     this.events.emit(record.relayTaskId, record);
+  }
+
+  // What the executor reads: the original task plus the operator-resolved deploy details.
+  manifest(record) {
+    const out = { relay_task_id: record.relayTaskId, ...record.task };
+    if (record.deployTarget) {
+      const envelope = deployEnvelope(record.task, record.deployTarget);
+      out.kind = envelope.kind;
+      out.deploy = { ...envelope.deploy, ...(record.task.deploy.notes ? { notes: record.task.deploy.notes } : {}) };
+    }
+    if (record.githubTarget) {
+      out.github = { repo: record.githubTarget.repo, ...(record.githubTarget.pr_number ? { pr_number: record.githubTarget.pr_number } : {}) };
+    }
+    return out;
   }
 
   approvalKey() {
@@ -478,6 +495,13 @@ export class TaskService {
     if (record.completion) {
       if (JSON.stringify(record.completion) !== JSON.stringify(completion)) {
         return { status: 409, body: { error: "A different terminal report already exists." } };
+      }
+      if (record.task.deploy && record.status === "finished" && !record.verification) {
+        // The relay stopped between saving the report and verifying it; the Bot's retry resumes it.
+        record.verification = await this.verify(record);
+        record.updatedAt = new Date().toISOString();
+        this.save(record);
+        await this.syncGithub(record);
       }
       return { status: 200, body: withReceipt({ ...this.view(record), deduplicated: true }) };
     }

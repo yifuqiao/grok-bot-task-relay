@@ -67,7 +67,7 @@ export function createRequestListener(config, fetchImpl = fetch) {
           return sendJson(res, outcome.status, outcome.body);
         }
         if (req.method === "GET" && executor[2] === "manifest") {
-          return sendJson(res, 200, { relay_task_id: record.relayTaskId, ...record.task });
+          return sendJson(res, 200, service.manifest(record));
         }
         if (req.method === "POST" && executor[2] === "report") {
           const report = JSON.parse(await readBody(req));
@@ -203,8 +203,6 @@ export function startServer(config, fetchImpl = fetch) {
   });
 }
 
-const approvalFailures = new Map();
-
 async function handleApproval(req, res, id, config, fetchImpl) {
   const service = taskService(config);
   if (!service) return sendHtml(res, 503, approvalPage({ message: "任务生命周期未启用。" }));
@@ -213,14 +211,13 @@ async function handleApproval(req, res, id, config, fetchImpl) {
   if (req.method === "GET") return sendHtml(res, 200, approvalPage({ record, view: service.view(record) }));
   if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed." });
   const form = parseBody(await readBody(req), req.headers["content-type"]);
-  const failures = approvalFailures.get(id) || 0;
-  if (failures >= 10) return sendHtml(res, 429, approvalPage({ record, view: service.view(record), message: "错误次数过多，这个任务的审批已锁定。重启服务后才能再试。" }));
+  // No lockout: anyone can read the approval URL, so failures must not block the real approver.
+  // The key is long (checked at startup) and each wrong attempt is slowed down instead.
   const key = service.approvalKey();
   if (!key || typeof form.approval_key !== "string" || !safeEqual(form.approval_key.trim(), key)) {
-    approvalFailures.set(id, failures + 1);
+    await new Promise((resolve) => setTimeout(resolve, config.approvalFailureDelayMs ?? 1000));
     return sendHtml(res, 401, approvalPage({ record, view: service.view(record), message: "审批钥匙不对。" }));
   }
-  approvalFailures.delete(id);
   const decision = form.decision === "approve" ? "approved" : form.decision === "decline" ? "declined" : null;
   if (!decision) return sendHtml(res, 400, approvalPage({ record, view: service.view(record), message: "请选择批准或拒绝。" }));
   const outcome = await service.decide(id, decision, fetchImpl);
