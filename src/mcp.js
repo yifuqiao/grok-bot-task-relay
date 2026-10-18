@@ -39,6 +39,8 @@ Deploys: call listDeployTargets to see the registered targets, then deployReleas
 
 Receipts on GitHub: when a task or deploy names a pull request (github.repo + github.pr_number for tasks, pr_number for deploys) and the operator configured a GitHub token, the relay posts a commit status for each progress change and a PR comment when approval is needed and when the task closes. Agents subscribed to that pull request get woken by those comments.
 
+Original-text check: when the relay has a public URL, every task carries a random echo token that appears only at the end of the relay's manifest. The executing bot must read the manifest itself and echo the token. integrity.status verified means the bot that reported it read the complete original task; mismatch means it worked from something else, such as a router's summary; unconfirmed means no bot has echoed it yet. Tell the user when integrity is not verified, especially before trusting a finished result.
+
 Waiting: waitForTask holds the call for up to ${MAX_WAIT_SECONDS} seconds and returns as soon as the task changes. Pass since_updated_at from the previous result so you only wake on new reports. A coding agent that the user asked to follow a handoff to the end may call waitForTask repeatedly, telling the user about each new status, until the task reaches finished, failed or rejected, or for as long as the user said to wait. Do not loop on getTaskStatus. listTasks recovers relayTaskIds from earlier chats or sessions.
 
 When the user asks which relay version is connected, call getRelayInfo once and report name, version, deliveryMode, and statusReports from the tool result. Do not invent a version from the ChatGPT app listing.

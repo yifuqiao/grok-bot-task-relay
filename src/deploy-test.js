@@ -431,6 +431,65 @@ try {
     taskServiceClose(settings);
   });
 
+  await check("the echo token proves the executing bot read the original manifest", async () => {
+    const net = fakeNet();
+    const settings = config(net);
+    const base = await listen(settings);
+    const task = { title: "Long brief", objective: "Follow the five steps", completion_criteria: ["All five steps done"], source: "claude",
+      markdown: "# Five steps\n" + "step\n".repeat(50) };
+    const submitted = (await call(settings, "submitTaskToGrokBot", task)).structuredContent;
+    const id = submitted.relayTaskId;
+    assert.equal(submitted.integrity.status, "unconfirmed");
+    const sent = net.calls.webhook.at(-1);
+    assert.equal(sent.manifest_echo_required, true);
+    assert.match(sent.payload_sha256, /^[a-f0-9]{64}$/);
+    assert.equal(sent.task_manifest_url, `https://relay.example/executor/tasks/${id}/manifest`);
+    assert.doesNotMatch(JSON.stringify(sent), /ECHO-/);
+    assert.doesNotMatch(JSON.stringify(submitted), /ECHO-/);
+
+    const manifest = await (await fetch(`${base}/executor/tasks/${id}/manifest`, { headers: executor })).json();
+    assert.equal(Object.keys(manifest).at(-1), "integrity");
+    assert.match(manifest.integrity.echo_token, /^ECHO-[2-9A-HJKMNP-Z]{4}-[2-9A-HJKMNP-Z]{4}$/);
+    assert.equal(manifest.integrity.payload_sha256, sent.payload_sha256);
+    assert.equal(manifest.markdown, task.markdown.trim());
+
+    await post(`${base}/executor/tasks/${id}/progress`, { event_id: "sort", status: "forwarded", summary: "To the ops bot" });
+    let view = (await call(settings, "getTaskStatus", { relay_task_id: id })).structuredContent;
+    assert.equal(view.integrity.status, "unconfirmed");
+    const bad = await post(`${base}/executor/tasks/${id}/progress`, { event_id: "ops-1", status: "received", summary: "Got a summary", echo_token: "ECHO-AAAA-BBBB" });
+    assert.equal(bad.status, 200);
+    assert.equal((await bad.json()).integrity.status, "mismatch");
+    const good = await post(`${base}/executor/tasks/${id}/progress`, { event_id: "ops-2", status: "executing", summary: "Read the manifest",
+      echo_token: ` ${manifest.integrity.echo_token.toLowerCase()} ` });
+    view = await good.json();
+    assert.equal(view.integrity.status, "verified");
+    assert.equal(view.integrity.event_id, "ops-2");
+    await post(`${base}/executor/tasks/${id}/progress`, { event_id: "ops-3", status: "finished", summary: "Done" });
+    view = (await call(settings, "getTaskStatus", { relay_task_id: id })).structuredContent;
+    assert.equal(view.status, "finished");
+    assert.equal(view.integrity.status, "verified");
+    assert.equal((await post(`${base}/executor/tasks/${id}/progress`, { event_id: "x", status: "executing", summary: "late", echo_token: 42 })).status, 409);
+    taskServiceClose(settings);
+  });
+
+  await check("a rejected report does not change the integrity record", async () => {
+    const net = fakeNet();
+    const settings = config(net);
+    const base = await listen(settings);
+    const { relayTaskId: id } = (await call(settings, "deployRelease", { target: "app-staging", commit_sha: SHA, pr_number: 11, source: "claude" })).structuredContent;
+    const bad = await post(`${base}/executor/tasks/${id}/report`, { event_id: "d", status: "finished", summary: "Done", echo_token: "ECHO-AAAA-BBBB" });
+    assert.equal(bad.status, 400);
+    const view = (await call(settings, "getTaskStatus", { relay_task_id: id })).structuredContent;
+    assert.equal(view.integrity.status, "unconfirmed");
+    const manifest = await (await fetch(`${base}/executor/tasks/${id}/manifest`, { headers: executor })).json();
+    const done = await (await post(`${base}/executor/tasks/${id}/report`, { event_id: "d", status: "finished", summary: "Done",
+      deployed_sha: SHA, echo_token: manifest.integrity.echo_token })).json();
+    assert.equal(done.integrity.status, "verified");
+    const comment = net.calls.github.filter((c) => c.path === "/repos/yifuqiao/app/issues/11/comments").at(-1).body.body;
+    assert.match(comment, /原文核对：\*\*verified/);
+    taskServiceClose(settings);
+  });
+
   await check("health reports the running commit", async () => {
     const net = fakeNet();
     const settings = config(net);

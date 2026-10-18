@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID, createHash, randomInt, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { deployEnvelope, resolveTarget, verifyDeployment } from "./deploy.js";
 import { forwardTask } from "./forward.js";
@@ -14,6 +14,15 @@ const ID = /^[a-f0-9-]{36}$/;
 const TERMINAL = new Set(["finished", "failed", "dry_run", "rejected"]);
 const SHA_PREFIX = /^[a-f0-9]{7,40}$/;
 export const MAX_WAIT_SECONDS = 50;
+// No 0/O/1/I/L so a bot copying the token by hand does not confuse characters.
+const ECHO_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+
+// The echo token appears only at the end of the manifest, never in the webhook envelope.
+// A bot that reports it back has read the relay's original task to the last line.
+export function newEchoToken() {
+  const pick = () => Array.from({ length: 4 }, () => ECHO_ALPHABET[randomInt(ECHO_ALPHABET.length)]).join("");
+  return `ECHO-${pick()}-${pick()}`;
+}
 
 export function taskService(config) {
   if (!config.dataDir) return null;
@@ -130,6 +139,14 @@ export class TaskService {
     if (record.githubTarget) {
       out.github = { repo: record.githubTarget.repo, ...(record.githubTarget.pr_number ? { pr_number: record.githubTarget.pr_number } : {}) };
     }
+    if (record.echoToken) {
+      // Keep this last: echoing it proves the reader got to the end of the original task.
+      out.integrity = {
+        payload_sha256: record.fingerprint,
+        echo_token: record.echoToken,
+        instruction: "Include echo_token unchanged in your first received or executing report. Routing bots: forward relay_task_id and task_manifest_url, not a summary.",
+      };
+    }
     return out;
   }
 
@@ -219,6 +236,9 @@ export class TaskService {
         repo: record.deployTarget?.repo ?? null, environment: record.deployTarget?.environment ?? null,
         requiresApproval: record.deployTarget?.requires_approval === true } } : {}),
       verification: record.verification ?? null,
+      integrity: record.echoToken ? { status: record.integrity?.status ?? "unconfirmed",
+        event_id: record.integrity?.event_id ?? null, reported_with: record.integrity?.reported_with ?? null,
+        at: record.integrity?.at ?? null, payload_sha256: record.fingerprint } : null,
       approval: record.approval ?? null,
       ...(record.status === "awaiting_approval" && this.links(record.relayTaskId).approval
         ? { approvalUrl: this.links(record.relayTaskId).approval } : {}),
@@ -268,6 +288,7 @@ export class TaskService {
     const relayTaskId = randomUUID();
     const now = new Date().toISOString();
     const record = { relayTaskId, owner, task, fingerprint, status: "submitting", updates: [], createdAt: now, updatedAt: now };
+    if (this.config.publicBaseUrl && !task.dry_run) record.echoToken = newEchoToken();
     record.deliveryMode = this.config.deliveryMode || "webhook";
     if (deployTarget) record.deployTarget = deployTarget;
     const githubTarget = githubTargetFor(task, deployTarget, relayTaskId);
@@ -337,6 +358,21 @@ export class TaskService {
     return { status: outcome.isError ? 502 : 200, body: outcome.result };
   }
 
+  // Records whether the reporting bot echoed the manifest token. A mismatch is kept, not rejected,
+  // so the caller sees that the executor worked from something other than the original.
+  checkEcho(record, input, eventId, status) {
+    if (input.echo_token === undefined) return {};
+    if (typeof input.echo_token !== "string" || input.echo_token.length > 64) {
+      return { error: { status: 400, body: { error: "echo_token must be the string from the manifest (max 64 characters)." } } };
+    }
+    if (!record.echoToken) return {};
+    const given = Buffer.from(input.echo_token.trim().toUpperCase());
+    const expected = Buffer.from(record.echoToken);
+    const matches = given.length === expected.length && timingSafeEqual(given, expected);
+    if (record.integrity?.status === "verified" && matches) return {};
+    return { integrity: { status: matches ? "verified" : "mismatch", event_id: eventId, reported_with: status, at: new Date().toISOString() } };
+  }
+
   async reverify(id, owner) {
     const record = this.get(id, owner);
     if (!record) return { isError: true, result: { error: "Task not found." } };
@@ -374,6 +410,12 @@ export class TaskService {
     }
     delete envelope.callback_target;
     delete envelope.client_request_id;
+    if (record.echoToken) {
+      // Always point at the original so routing bots can pass it on instead of retelling it.
+      envelope.task_manifest_url = new URL(`/executor/tasks/${relayTaskId}/manifest`, this.config.publicBaseUrl).href;
+      envelope.payload_sha256 = record.fingerprint;
+      envelope.manifest_echo_required = true;
+    }
     if (task.markdown || Buffer.byteLength(JSON.stringify(envelope)) > 3000) {
       if (!this.config.publicBaseUrl || !this.config.botReportKey) {
         return { isError: true, result: { error: "Rich task manifests require RELAY_PUBLIC_BASE_URL and BOT_REPORT_KEY. Use HTTPS attachment references or brief_url until configured." } };
@@ -453,6 +495,9 @@ export class TaskService {
     const checked = checkProgress(record, input);
     if (checked.error) return checked.error;
     if (checked.duplicate) return { status: 200, body: withReceipt({ ...this.view(record), deduplicated: true }) };
+    const echo = this.checkEcho(record, input, checked.eventId, checked.status);
+    if (echo.error) return echo.error;
+    if (echo.integrity) record.integrity = echo.integrity;
     const now = new Date().toISOString();
     record.updates = record.updates || [];
     record.updates.push({ event_id: checked.eventId, status: checked.status, summary: checked.summary, at: now });
@@ -490,11 +535,17 @@ export class TaskService {
     }
     if (record.task.deploy && input.status === "finished" && !deployedSha) errors.push("Finished deploy reports must include deployed_sha.");
     if (errors.length) return { status: 400, body: { error: errors.join(" ") } };
+    const echo = this.checkEcho(record, input, input.event_id, input.status);
+    if (echo.error) return echo.error;
     const completion = { event_id: input.event_id, status: input.status, summary: input.summary, artifacts,
       ...(deployedSha ? { deployed_sha: deployedSha } : {}) };
     if (record.completion) {
       if (JSON.stringify(record.completion) !== JSON.stringify(completion)) {
         return { status: 409, body: { error: "A different terminal report already exists." } };
+      }
+      if (echo.integrity) {
+        record.integrity = echo.integrity;
+        this.save(record);
       }
       if (record.task.deploy && record.status === "finished" && !record.verification) {
         // The relay stopped between saving the report and verifying it; the Bot's retry resumes it.
@@ -506,6 +557,7 @@ export class TaskService {
       return { status: 200, body: withReceipt({ ...this.view(record), deduplicated: true }) };
     }
     if (record.status === "rejected") return { status: 409, body: { error: "Task was rejected by the webhook." } };
+    if (echo.integrity) record.integrity = echo.integrity;
     record.completion = completion;
     record.status = completion.status;
     record.updatedAt = new Date().toISOString();

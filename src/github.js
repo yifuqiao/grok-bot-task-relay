@@ -128,6 +128,11 @@ export class GithubReceipts {
       if (record.completion?.deployed_sha) lines.push(`- Bot 报告实际部署：\`${short(record.completion.deployed_sha)}\``);
       if (record.verification) lines.push(`- 中转独立核验：**${record.verification.status}**${record.verification.observedSha ? `，health 显示 \`${short(record.verification.observedSha)}\`` : ""}${record.verification.httpStatus ? `（HTTP ${record.verification.httpStatus}）` : ""}`);
     }
+    if (record.echoToken) {
+      const integrity = record.integrity?.status || "unconfirmed";
+      const label = { verified: "执行 Bot 读到了完整原文", mismatch: "执行 Bot 回报的暗号不对，它手上的可能不是原文", unconfirmed: "执行 Bot 还没回报暗号" }[integrity];
+      lines.push(`- 原文核对：**${integrity}**（${label}）`);
+    }
     if (record.status === "awaiting_approval" && links.approval) {
       lines.push("", `需要人工批准后才会发给 Grok Bot：${links.approval}`, "批准页要求输入审批钥匙，聊天里的 AI 无法代为批准。");
     }

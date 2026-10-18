@@ -100,7 +100,19 @@ HTTP 也有对应接口，都用调用方的 Bearer 钥匙：`POST /deploy`、`G
 
 GitHub commit status 的含义一样：verified 对应 success，mismatch 对应 failure，unreachable 对应 error。
 
-## 5. GitHub 回执
+## 5. 原文核对（暗号）
+
+任务经过收件分拣、转交这些中间环节时，执行的 Bot 拿到的可能是别人的转述，不是原文。relay 用暗号来确认这一点：
+
+- relay 配置了 `RELAY_PUBLIC_BASE_URL` 时，每个任务都会生成一个随机暗号，形如 `ECHO-7F3K-92QD`。暗号只写在 relay 任务清单的最末尾，webhook 消息里没有，转述的摘要里也不会有。
+- webhook 消息里总是带着 `task_manifest_url`、`payload_sha256`（原文指纹）和 `manifest_echo_required: true`。
+- 执行的 Bot 用执行端钥匙读取清单，在第一次回报 `received` 或 `executing` 时把暗号放进 `echo_token` 字段。
+- relay 自动比对，结果写在任务的 `integrity.status` 里：`verified` 表示回报的 Bot 读完了完整原文；`mismatch` 表示暗号不对，它手上的不是原文；`unconfirmed` 表示还没有 Bot 回报暗号。
+- 暗号不对时，relay 不会拒收这次回报，只会如实记录，由调用方判断要不要相信结果。PR 回执评论里也会显示这一项。
+
+LLM 算不了 sha256，所以 `payload_sha256` 留给程序核对，Bot 只需要回显暗号。
+
+## 6. GitHub 回执
 
 任务或部署带上 PR 后：
 
@@ -111,7 +123,7 @@ GitHub commit status 的含义一样：verified 对应 success，mismatch 对应
 
 Claude Code 云端会话订阅了 PR 之后，PR 评论会把会话唤醒，所以 Claude 不需要一直轮询，也能看到“已部署并核验”。
 
-## 6. 安全边界
+## 7. 安全边界
 
 - 模型只能选登记过的目标名，不能指定主机、命令或 health 地址。
 - 部署只接受完整 commit sha，避免“部署 main”时实际部署了别的提交。
@@ -119,6 +131,6 @@ Claude Code 云端会话订阅了 PR 之后，PR 评论会把会话唤醒，所�
 - `finished` 只能由带执行端钥匙的回报产生。部署成功还要通过中转自己的 health 核对。
 - GitHub 回执只发到白名单仓库。
 
-## 7. 验证
+## 8. 验证
 
 `npm test` 包含 `src/deploy-test.js`：目标白名单和调用方限制、部署信封、去重、PR 回执、commit 不一致、Bot 报错 sha、人工审批（调用方钥匙不能代替审批钥匙）、长轮询、任务列表隔离、GitHub 失败不影响结果。测试使用本地假服务，不连接真实的 Grok Bot 或 GitHub。

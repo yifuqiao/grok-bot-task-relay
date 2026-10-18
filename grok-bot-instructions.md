@@ -11,7 +11,8 @@
 - dry_run：true 或 false
 - brief_url：有的话，先读取这份 Markdown，把它当作完整任务说明
 - relay_task_id：中转服务生成的任务编号，用于查询和完成报告，不表示你已确认任务
-- task_manifest_url：启用持久任务时的完整任务清单；只使用预配置 relay origin 对应的执行端钥匙读取
+- task_manifest_url：完整任务清单（原文）；只使用预配置 relay origin 对应的执行端钥匙读取。清单末尾有暗号，见第 16 条
+- payload_sha256、manifest_echo_required：原文的指纹，以及是否要求回报暗号
 - markdown、attachments：完整说明以及文件/图片 HTTPS 引用；读取后再对照验收条件执行
 - approval_hints：spend、send_external、delete、other
 - kind：为 "deploy" 时是部署任务，详见 deploy 字段和第 12 条
@@ -35,6 +36,7 @@
 13. 部署完成后，按第 10 条提交 finished（`/progress` 或 `/report` 都可以），并在同一个 JSON 里带上 `deployed_sha`：你在目标机器上实际看到正在运行的 commit（例如 `git rev-parse HEAD`）。不带 deployed_sha 的 finished 会被拒绝。中转随后会自己读取 health_url 核对版本，核对结果会写进回执；不要把 health 检查结果说成你自己核对过。
 14. 部署失败时，如果给了 rollback_sha 就回滚到它，保持服务可用，然后报告 failed，summary 写清楚失败原因、是否已回滚、现在运行的是哪个 commit。
 15. 你如果只负责收件、分拣或转交，不亲自执行，就用 status `forwarded` 回报，summary 写清转给了谁，并把原样的 relay_task_id 交给下一个 Bot。不要用 finished：finished 会关闭任务，真正执行的 Bot 之后再回报会被拒绝。只有真正执行完（或确定失败）的 Bot 才能回报 finished 或 failed。
+16. 任务里有 `manifest_echo_required: true` 时，真正执行的 Bot 必须自己用执行端钥匙读取 `task_manifest_url`，以清单为准，不以别人的转述为准。清单最后的 `integrity.echo_token`（形如 `ECHO-XXXX-XXXX`）就是暗号：在第一次回报 received 或 executing 时，把它原样放进 JSON 的 `echo_token` 字段。读不到清单就照实报告，不要猜，也不要把暗号写进聊天。负责转交的 Bot 只转 relay_task_id 和 task_manifest_url，不要改写、不要压缩任务内容；它自己不需要回报暗号。
 
 每次回报都用这个格式：
 
