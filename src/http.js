@@ -203,6 +203,10 @@ export function startServer(config, fetchImpl = fetch) {
   });
 }
 
+// Wrong-key attempts are counted per source IP + task. The correct key always wins:
+// it is checked first (timing-safe) and clears that IP's bucket for the task.
+const approvalFailures = new Map();
+
 async function handleApproval(req, res, id, config, fetchImpl) {
   const service = taskService(config);
   if (!service) return sendHtml(res, 503, approvalPage({ message: "任务生命周期未启用。" }));
@@ -211,13 +215,21 @@ async function handleApproval(req, res, id, config, fetchImpl) {
   if (req.method === "GET") return sendHtml(res, 200, approvalPage({ record, view: service.view(record) }));
   if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed." });
   const form = parseBody(await readBody(req), req.headers["content-type"]);
-  // No lockout: anyone can read the approval URL, so failures must not block the real approver.
-  // The key is long (checked at startup) and each wrong attempt is slowed down instead.
   const key = service.approvalKey();
-  if (!key || typeof form.approval_key !== "string" || !safeEqual(form.approval_key.trim(), key)) {
+  const provided = typeof form.approval_key === "string" ? form.approval_key.trim() : "";
+  const correct = Boolean(key && provided && safeEqual(provided, key));
+  const ip = approvalClientIp(req);
+  if (!correct) {
+    if (approvalRateLimited(config, ip, id)) {
+      return sendHtml(res, 429, approvalPage({
+        record, view: service.view(record),
+        message: "错误次数过多，请稍后再试。正确的审批钥匙仍可立即批准。",
+      }));
+    }
     await new Promise((resolve) => setTimeout(resolve, config.approvalFailureDelayMs ?? 1000));
     return sendHtml(res, 401, approvalPage({ record, view: service.view(record), message: "审批钥匙不对。" }));
   }
+  clearApprovalFailures(ip, id);
   const decision = form.decision === "approve" ? "approved" : form.decision === "decline" ? "declined" : null;
   if (!decision) return sendHtml(res, 400, approvalPage({ record, view: service.view(record), message: "请选择批准或拒绝。" }));
   const outcome = await service.decide(id, decision, fetchImpl);
@@ -227,6 +239,35 @@ async function handleApproval(req, res, id, config, fetchImpl) {
     : decision === "declined" ? "已拒绝，这次部署不会发给 Grok Bot。"
       : current.status === "submitted" || current.status === "queued" ? "已批准，已交给 Grok Bot。" : `已批准，但交付状态是 ${current.status}。`;
   return sendHtml(res, outcome.status === 409 ? 409 : 200, approvalPage({ record: current, view: service.view(current), message }));
+}
+
+function approvalClientIp(req) {
+  const peer = String(req.socket?.remoteAddress || "");
+  return peer.startsWith("::ffff:") ? peer.slice(7) : peer || "unknown";
+}
+
+function approvalFailureKey(ip, taskId) {
+  return `${ip}\0${taskId}`;
+}
+
+function approvalRateLimited(config, ip, taskId) {
+  const windowMs = config.approvalFailWindowMs ?? 15 * 60 * 1000;
+  const maxFails = config.approvalFailMax ?? 10;
+  const key = approvalFailureKey(ip, taskId);
+  const now = Date.now();
+  let bucket = approvalFailures.get(key);
+  if (!bucket || now - bucket.windowStart > windowMs) bucket = { count: 0, windowStart: now };
+  if (bucket.count >= maxFails) {
+    approvalFailures.set(key, bucket);
+    return true;
+  }
+  bucket.count += 1;
+  approvalFailures.set(key, bucket);
+  return false;
+}
+
+function clearApprovalFailures(ip, taskId) {
+  approvalFailures.delete(approvalFailureKey(ip, taskId));
 }
 
 function authorized(req, config, oauth) {

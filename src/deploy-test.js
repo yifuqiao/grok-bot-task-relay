@@ -268,16 +268,21 @@ try {
     taskServiceClose(settings);
   });
 
-  await check("wrong approval keys from strangers never lock out the real approver", async () => {
+  await check("wrong approval keys are rate-limited per IP but the correct key always works", async () => {
     const net = fakeNet();
-    const settings = config(net);
+    const settings = config(net, { approvalFailMax: 3, approvalFailWindowMs: 60_000 });
     const base = await listen(settings);
     const { relayTaskId: id } = (await call(settings, "deployRelease", { target: "app-prod", commit_sha: SHA, source: "claude" })).structuredContent;
     const form = (key) => fetch(`${base}/approvals/${id}`, { method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ approval_key: key, decision: "approve" }).toString() });
-    for (let i = 0; i < 12; i++) assert.equal((await form(`wrong-${i}`)).status, 401);
+    assert.equal((await form("wrong-1")).status, 401);
+    assert.equal((await form("wrong-2")).status, 401);
+    assert.equal((await form("wrong-3")).status, 401);
+    assert.equal((await form("wrong-4")).status, 429);
+    assert.equal((await form("wrong-5")).status, 429);
     assert.equal(net.calls.webhook.length, 0);
+    // Correct key bypasses and clears the per-IP lockout even after the stranger hit the cap.
     assert.equal((await form("fake-approval-key-0123456789")).status, 200);
     assert.equal(net.calls.webhook.length, 1);
     taskServiceClose(settings);
@@ -289,14 +294,25 @@ try {
     const base = await listen(settings);
     const queued = (await call(settings, "deployRelease", { target: "app-staging", commit_sha: SHA, pr_number: 5, notes: "Migrate first.", source: "claude" })).structuredContent;
     assert.equal(queued.status, "queued");
+    assert.equal(net.calls.webhook.length, 0);
     const manifest = await (await fetch(`${base}/executor/tasks/${queued.relayTaskId}/manifest`, { headers: executor })).json();
     assert.equal(manifest.kind, "deploy");
     assert.equal(manifest.deploy.repo, "yifuqiao/app");
     assert.equal(manifest.deploy.environment, "staging");
     assert.equal(manifest.deploy.health_url, "https://app.example/health");
+    assert.equal(manifest.deploy.health_sha_field, "build.commit");
     assert.equal(manifest.deploy.commit_sha, SHA);
+    assert.equal(manifest.deploy.report_deployed_sha, true);
     assert.equal(manifest.deploy.notes, "Migrate first.");
     assert.deepEqual(manifest.github, { repo: "yifuqiao/app", pr_number: 5 });
+    // Claim + finish using only the pull manifest fields an executor would see.
+    assert.equal((await post(`${base}/executor/tasks/${queued.relayTaskId}/claim`, { claim_id: "pull-1" })).status, 200);
+    const done = await (await post(`${base}/executor/tasks/${queued.relayTaskId}/report`, {
+      claim_id: "pull-1", event_id: "done", status: "finished", summary: "Deployed from pull manifest.",
+      deployed_sha: manifest.deploy.commit_sha,
+    })).json();
+    assert.equal(done.status, "finished");
+    assert.equal(done.verification.status, "verified");
     taskServiceClose(settings);
   });
 
